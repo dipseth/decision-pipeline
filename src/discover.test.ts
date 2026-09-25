@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { auc, crossValidate, discoverFeatures, encodeAnswer, fitLogistic, groupFolds, predictLogistic, type DiscoverAction, type DiscoverRow } from "./discover";
+import { auc, crossValidate, discoverFeatures, encodeAnswer, fitLogistic, fitRidge, groupFolds, predictLinear, predictLogistic, spearman, type DiscoverAction, type DiscoverRow } from "./discover";
 import { hashToUnit } from "./hash";
 
 // Deterministic pseudo-random in [0,1) from a string.
@@ -44,7 +44,7 @@ describe("grouped folds", () => {
     const y = rows.map((r) => r.label);
     const base = crossValidate(rows.map((r) => r.base), y, rows.map((r) => r.group)).score;
     const withSignal = crossValidate(rows.map((r) => [...r.base, r.signal]), y, rows.map((r) => r.group)).score;
-    expect(withSignal.logLoss).toBeLessThan(base.logLoss);
+    expect(withSignal.loss).toBeLessThan(base.loss);
     expect(withSignal.auc).toBeGreaterThan(0.85);
   });
 });
@@ -87,6 +87,67 @@ describe("discoverFeatures", () => {
     expect(names).not.toContain("flat");
     expect(out.accepted.find((q) => q.name === "signal")!.round).toBe(1);
     expect(out.journal.some((j) => j.what === "reject" && j.name === "signal")).toBe(true);
-    expect(out.history[0]!.logLoss).toBeLessThan(out.baseCv.logLoss);
+    expect(out.history[0]!.loss).toBeLessThan(out.baseCv.loss);
+  });
+});
+
+describe("numeric target", () => {
+  /** A critic-style score: 80 + 12 × a hidden quality only the right question can see, plus noise. */
+  const scored = (n: number): Array<DiscoverRow & { quality: number }> =>
+    Array.from({ length: n }, (_, i) => {
+      const quality = u(`q${i}`);
+      return { id: `w${i}`, group: `w${i}`, label: 80 + 12 * quality + 2 * (u(`e${i}`) - 0.5), base: [u(`b${i}`)], text: `note ${i}`, quality };
+    });
+
+  it("ridge recovers a planted slope", () => {
+    const X = Array.from({ length: 300 }, (_, i) => [u(`x${i}`), u(`z${i}`)]);
+    const y = X.map(([a]) => 3 + 5 * a!);
+    const m = fitRidge(X, y, 1e-6);
+    expect(predictLinear(m, [0.5, 0.9])).toBeCloseTo(5.5, 3);
+    expect(Math.abs(m.w[1]!)).toBeLessThan(1e-3);
+  });
+
+  it("spearman is 1 for a monotone map and -1 for a reversed one", () => {
+    expect(spearman([1, 2, 3, 4], [10, 20, 30, 45])).toBeCloseTo(1);
+    expect(spearman([1, 2, 3, 4], [4, 3, 2, 1])).toBeCloseTo(-1);
+  });
+
+  it("scores rounds in RMSE, shows the author the label range, and keeps the question that sees quality", async () => {
+    const rows = scored(200);
+    let firstExamples = "";
+    const out = await discoverFeatures({
+      rows,
+      baseNames: ["base0"],
+      target: "numeric",
+      rounds: 1,
+      examples: 5,
+      ports: {
+        author: async (req) => {
+          firstExamples = req.examples;
+          return [
+            { op: "add", target: "", name: "quality", kind: "intensity", question: "How good does it sound?" },
+            { op: "add", target: "", name: "noise", kind: "presence", question: "Is it odd?" },
+          ];
+        },
+        answer: async (rs, qs) =>
+          Object.fromEntries(qs.map((q) => [q.name, rs.map((r, i) => {
+            if (q.name === "noise") return [u(`o${i}`)];
+            const level = Math.min(4, Math.floor((r as (typeof rows)[number]).quality * 5));
+            return [0, 1, 2, 3, 4].map((k) => (k === level ? 1 : 0));
+          })])),
+      },
+    });
+    expect(out.baseCv.rmse).toBeGreaterThan(3);
+    expect(out.history[0]!.rmse).toBeLessThan(1.5);
+    expect(out.history[0]!.spearman).toBeGreaterThan(0.9);
+    expect(out.history[0]!.logLoss).toBeUndefined();
+    // Round 1 spans the range: lowest and highest label both shown.
+    const labels = rows.map((r) => r.label);
+    expect(firstExamples).toContain(`label ${Math.round(Math.min(...labels) * 100) / 100}`);
+    expect(firstExamples).toContain(`label ${Math.round(Math.max(...labels) * 100) / 100}`);
+  });
+
+  it("refuses non-0/1 labels on a binary target", async () => {
+    await expect(discoverFeatures({ rows: scored(10), baseNames: ["b"], ports: { author: async () => [], answer: async () => ({}) } })).rejects.toThrow(/numeric/);
   });
 });

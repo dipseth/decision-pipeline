@@ -12,6 +12,12 @@
   <img src="https://img.shields.io/badge/runtime%20deps-zod%20only-9C8A45?style=flat-square" alt="Runtime dependencies: zod only">
 </p>
 
+<p align="center">
+  <img src="assets/your-logic-here.jpg" height="260" alt="A cartoon geisha holds up a postcard reading 'YOUR LOGIC HERE'">
+  &nbsp;
+  <img src="assets/welcome-to-doom.jpg" height="260" alt="The same postcard: 'Welcome to you're DOOM!'">
+</p>
+
 ---
 
 Most LLM features start life as a chain: ask a model, trust its answer, save it. That is hard to debug, hard to tune, and every request pays for the biggest model.
@@ -366,6 +372,40 @@ flowchart LR
 2. **Shadow.** `runShadow` runs the challenger next to the champion. The champion ships exactly as it would alone. The challenger's writes are captured, never stored, and if it crashes the champion never notices. Model calls that both sides make identically are shared, so you measure the pipeline rather than model noise, and you pay only for the calls that differ.
 3. **Claim.** A hypothesis is JSON: a metric, a test ("greater than 0.9"), optional guardrails (cost, latency) and a held-out split. `lockHypothesis` hashes it before any data arrives.
 4. **Trial.** `collectTrial` gathers paired champion/challenger rows on the held-out side. `judgeTrial` returns *supported* only when the whole confidence interval clears the claim, *refuted* when the whole interval misses it, and *inconclusive* otherwise.
+
+### Discover: let the errors write the next questions
+
+`propose` changes a pipeline's shape. `discoverForSpec` changes what it asks. It follows TypeSafe's [autoresearch feature discovery](https://docs.typesafe.ai/cookbooks/autoresearch_feature_discovery) cookbook:
+
+1. An LLM (your `author` port) proposes questions to add, revise or drop.
+2. Jev (your `answer` port) answers them for every labelled row.
+3. A small model learns from the answers.
+4. Its worst-predicted rows go back to the author for the next round.
+
+An add stays unless its answers barely vary. A revise or drop has to lower the cross-validated error, and checking one costs a refit, not a model call.
+
+Discovery is **not a node**. A node runs once per input. Discovery runs over many recorded runs and their labels, and what it produces has to clear a shadow and a trial like any other challenger. It returns a patched spec that uses only kinds you already have:
+
+| Node | Kind | What it does |
+|---|---|---|
+| `<prefix>_ask` | `decide` | Asks the discovered questions. Publish `questionSet` under its `questions` name. |
+| `<prefix>_score` | `code` (`derive`) | The fitted model, written out as one JSONata `expr`. A refit is a new expression, so it is a new node version. |
+| `<prefix>_gate` | `code` (`gate`) | Optional. `score >= $t.cut` picks a branch. The cut is a threshold like any other. |
+
+The learner is linear on purpose: logistic regression for a yes/no target, ridge for a number. A model that has to live in a spec as one reviewable expression can't be a boosted forest. `attachLearnedGate` is the pure half, if you already have a model and only need the patch.
+
+**Does linear cost accuracy?** Not on the cookbook's own data. We re-ran it ([examples/wine](examples/wine)) with the same 2,000 wine reviews and seeded 1,200/800 split, the same brief and the same author model (Sonnet 5), with Jev 1.13 answering and ridge in place of CatBoost. All numbers are RMSE on the 800 held-out reviews, in critic points:
+
+| How the note becomes a score | Cookbook (CatBoost) | Here (ridge) |
+|---|---|---|
+| Predict the average | 3.09 | 3.09 |
+| Ask Jev for the score outright, then rescale | 2.15 | 1.98 |
+| Round 1 questions only | 1.87 | 1.80 (18 questions) |
+| After 5 rounds | 1.77 (38 questions) | **1.73** (32 questions) |
+
+Rounds 2–5 improved on round 1 by 0.070 points (95% CI [−0.125, −0.018]). The loop took 2.8 minutes, and the whole run cost well under $1 of Jev.
+
+The patched spec then ran as a real pipeline, with its decide port calling Jev. Its scores matched the offline model to 1e-8 on every held-out note checked. One rule makes that true: **publish the wording the loop asked.** Build the answer port's questions with `learnedQuestionSet`, and pass the same `presence` criteria to the attach. Our first run skipped that. Its production scores drifted by up to 0.05 points and one of 25 routes flipped.
 
 ## In production
 

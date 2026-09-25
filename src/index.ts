@@ -37,3 +37,4 @@ export * from "./metrics";
 export * from "./hypothesis";
 export * from "./trial";
 export * from "./discover";
+export * from "./learned";

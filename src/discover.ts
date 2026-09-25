@@ -5,10 +5,12 @@
  *
  * After TypeSafe's "Autoresearch feature discovery" cookbook, with three
  * departures:
- *   - the target is BINARY (e.g. "was the cheap branch's answer right?"), so the
- *     learner is L2 logistic regression, which is pure TS and inspectable, instead of
- *     CatBoost. A gate needs a calibrated probability more than it needs the last
- *     point of accuracy, and at a few hundred negatives a boosted model memorises;
+ *   - the learner is LINEAR, so it is pure TS, inspectable, and writable into a
+ *     spec as one expression (./learned): L2 logistic regression for a binary
+ *     target (e.g. "was the cheap branch's answer right?"), ridge regression for a
+ *     numeric one (the cookbook's critic score). A gate needs a calibrated
+ *     probability more than it needs the last point of accuracy, and at a few
+ *     hundred negatives a boosted model memorises;
  *   - folds are GROUPED (a row's `group`, e.g. the recipe a transformed copy
  *     came from), so a copy never sits in the fold that judges its parent;
  *   - every round is scored against `base` columns the host already has for
@@ -17,13 +19,15 @@
  *
  * Accept rules follow the cookbook. An add goes in unless its column is flat.
  * A revise or drop is tried first by refitting, which costs no port calls, and is
- * kept only if CV log loss drops. Only dev rows may reach this function. The host
+ * kept only if the CV loss drops (log loss, or RMSE for a numeric target). Only dev rows may reach this function. The host
  * scores its held-out rows once, outside it.
  */
 
 import { hashToUnit } from "./hash";
 
 export type QuestionKind = "intensity" | "presence";
+/** binary: labels are 0/1, logistic regression, log loss. numeric: any number, ridge regression, RMSE. */
+export type DiscoverTarget = "binary" | "numeric";
 
 export interface DiscoveredQuestion {
   name: string;
@@ -46,7 +50,8 @@ export interface DiscoverRow {
   id: string;
   /** Rows sharing a group always share a fold. */
   group: string;
-  label: 0 | 1;
+  /** 0 or 1 for a binary target; any finite number for a numeric one. */
+  label: number;
   /** Columns the host already has (named by `baseNames`). */
   base: number[];
   /** What the author reads for this row. */
@@ -56,7 +61,7 @@ export interface DiscoverRow {
 export interface DiscoverAuthorRequest {
   round: number;
   accepted: DiscoveredQuestion[];
-  /** Rendered rows: round 1 spans both labels; later rounds show the worst half and the best half. */
+  /** Rendered rows: round 1 spans the labels; later rounds show the worst half and the best half. */
   examples: string;
   /** The scoreboard: CV history, per-question importance and spread. Empty on round 1. */
   feedback: string;
@@ -77,6 +82,8 @@ export interface DiscoverOptions {
   rows: DiscoverRow[];
   baseNames: string[];
   ports: DiscoverPorts;
+  /** Default "binary". */
+  target?: DiscoverTarget;
   rounds?: number;
   examples?: number;
   maxActions?: number;
@@ -101,7 +108,7 @@ export interface DiscoverResult {
   accepted: DiscoveredQuestion[];
   /** Every answered question id (`name@round`) → per-row probability vectors. */
   answers: Record<string, number[][]>;
-  /** CV log loss of `base` alone: the bar. */
+  /** CV score of `base` alone: the bar. */
   baseCv: CvScore;
   history: CvScore[];
   snapshots: DiscoveredQuestion[][];
@@ -215,6 +222,37 @@ export const fitLogistic = (X: readonly number[][], y: readonly number[], lambda
 export const predictLogistic = (m: LogisticModel, x: readonly number[]): number =>
   sigmoid(m.b + x.reduce((a, v, j) => a + ((v - m.mean[j]!) / m.sd[j]!) * m.w[j]!, 0));
 
+/** Ridge regression on standardised columns, closed form; the intercept is not penalised. Same shape as a logistic fit. */
+export const fitRidge = (X: readonly number[][], y: readonly number[], lambda = 1): LogisticModel => {
+  const d = X[0]?.length ?? 0;
+  const n = X.length;
+  const mean = Array.from({ length: d }, (_, j) => X.reduce((a, r) => a + r[j]!, 0) / Math.max(1, n));
+  const sd = Array.from({ length: d }, (_, j) => Math.sqrt(X.reduce((a, r) => a + (r[j]! - mean[j]!) ** 2, 0) / Math.max(1, n)) || 1);
+  const yMean = y.reduce((a, v) => a + v, 0) / Math.max(1, n);
+  // Centred columns and target, so the intercept is the target mean and drops out.
+  const A = Array.from({ length: d }, (_, j) => Array.from({ length: d }, (_, k) => (j === k ? lambda : 0)));
+  const g = new Array(d).fill(0);
+  for (let i = 0; i < n; i++) {
+    const z = X[i]!.map((v, j) => (v - mean[j]!) / sd[j]!);
+    const r = y[i]! - yMean;
+    for (let j = 0; j < d; j++) {
+      g[j] += z[j]! * r;
+      for (let k = j; k < d; k++) A[j]![k]! += z[j]! * z[k]!;
+    }
+  }
+  for (let j = 0; j < d; j++) for (let k = 0; k < j; k++) A[j]![k] = A[k]![j]!;
+  return { b: yMean, w: d ? solve(A, g) : [], mean, sd };
+};
+
+export const predictLinear = (m: LogisticModel, x: readonly number[]): number =>
+  m.b + x.reduce((a, v, j) => a + ((v - m.mean[j]!) / m.sd[j]!) * m.w[j]!, 0);
+
+/** The learner a target implies. */
+export const learnerFor = (target: DiscoverTarget) =>
+  target === "numeric"
+    ? { fit: fitRidge, predict: predictLinear }
+    : { fit: (X: readonly number[][], y: readonly number[], lambda?: number) => fitLogistic(X, y, lambda), predict: predictLogistic };
+
 // ---------------------------------------------------------------------------
 // Scoring
 // ---------------------------------------------------------------------------
@@ -239,11 +277,49 @@ export const auc = (y: readonly number[], p: readonly number[]): number => {
   return (sumPos - (pos * (pos + 1)) / 2) / (pos * neg);
 };
 
+export const rmse = (y: readonly number[], p: readonly number[]): number =>
+  Math.sqrt(y.reduce((a, v, i) => a + (v - p[i]!) ** 2, 0) / Math.max(1, y.length));
+
+const ranks = (v: readonly number[]): number[] => {
+  const idx = v.map((x, i) => [x, i] as const).sort((a, b) => a[0] - b[0]);
+  const out = new Array(v.length).fill(0);
+  for (let i = 0; i < idx.length; ) {
+    let j = i;
+    while (j + 1 < idx.length && idx[j + 1]![0] === idx[i]![0]) j++;
+    for (let k = i; k <= j; k++) out[idx[k]![1]] = (i + j) / 2;
+    i = j + 1;
+  }
+  return out;
+};
+
+/** Rank correlation, ties averaged: does the model order the rows the way the labels do? */
+export const spearman = (a: readonly number[], b: readonly number[]): number => {
+  const ra = ranks(a), rb = ranks(b);
+  const n = ra.length;
+  if (n < 2) return 0;
+  const ma = ra.reduce((s, v) => s + v, 0) / n, mb = rb.reduce((s, v) => s + v, 0) / n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) { num += (ra[i]! - ma) * (rb[i]! - mb); da += (ra[i]! - ma) ** 2; db += (rb[i]! - mb) ** 2; }
+  return da && db ? num / Math.sqrt(da * db) : 0;
+};
+
 export interface CvScore {
-  logLoss: number;
-  auc: number;
+  /** What the loop minimises: log loss (binary) or RMSE (numeric). */
+  loss: number;
+  /** Binary target only. */
+  logLoss?: number;
+  auc?: number;
+  /** Numeric target only. */
+  rmse?: number;
+  spearman?: number;
   columns: number;
 }
+
+/** One line for a log or the author's scoreboard. */
+export const describeCv = (s: CvScore): string =>
+  s.rmse !== undefined
+    ? `RMSE ${s.rmse.toFixed(3)}, Spearman ${(s.spearman ?? 0).toFixed(3)}`
+    : `log loss ${(s.logLoss ?? s.loss).toFixed(4)}, AUC ${(s.auc ?? 0.5).toFixed(3)}`;
 
 /** Fold index per row: whole groups dealt to folds by salted hash. */
 export const groupFolds = (groups: readonly string[], k: number, seed: number): number[] =>
@@ -253,10 +329,12 @@ export const crossValidate = (
   X: readonly number[][],
   y: readonly number[],
   groups: readonly string[],
-  opts: { folds?: number; repeats?: number; lambda?: number } = {},
+  opts: { folds?: number; repeats?: number; lambda?: number; target?: DiscoverTarget } = {},
 ): { oof: number[]; score: CvScore } => {
   const k = opts.folds ?? 5;
   const repeats = opts.repeats ?? 2;
+  const numeric = opts.target === "numeric";
+  const { fit, predict } = learnerFor(opts.target ?? "binary");
   const oof = new Array(y.length).fill(0);
   let loss = 0;
   for (let rep = 0; rep < repeats; rep++) {
@@ -266,13 +344,20 @@ export const crossValidate = (
       const tr = y.map((_, i) => i).filter((i) => fold[i] !== f);
       const te = y.map((_, i) => i).filter((i) => fold[i] === f);
       if (!te.length || !tr.length) continue;
-      const m = fitLogistic(tr.map((i) => X[i]!), tr.map((i) => y[i]!), opts.lambda);
-      for (const i of te) pred[i] = predictLogistic(m, X[i]!);
+      const m = fit(tr.map((i) => X[i]!), tr.map((i) => y[i]!), opts.lambda);
+      for (const i of te) pred[i] = predict(m, X[i]!);
     }
-    loss += logLoss(y, pred);
+    loss += numeric ? rmse(y, pred) : logLoss(y, pred);
     pred.forEach((v, i) => (oof[i] += v / repeats));
   }
-  return { oof, score: { logLoss: loss / repeats, auc: auc(y, oof), columns: X[0]?.length ?? 0 } };
+  const columns = X[0]?.length ?? 0;
+  const mean = loss / repeats;
+  return {
+    oof,
+    score: numeric
+      ? { loss: mean, rmse: mean, spearman: spearman(y, oof), columns }
+      : { loss: mean, logLoss: mean, auc: auc(y, oof), columns },
+  };
 };
 
 /** Share of |standardised coefficient| per owner (a question owns its mean + sd columns). */
@@ -294,7 +379,13 @@ const slug = (name: string, taken: Set<string>): string => {
   return c;
 };
 
-const pickExamples = (rows: readonly DiscoverRow[], oof: number[] | null, n: number): Array<{ row: DiscoverRow; p: number | null }> => {
+const pickExamples = (rows: readonly DiscoverRow[], oof: number[] | null, n: number, target: DiscoverTarget): Array<{ row: DiscoverRow; p: number | null }> => {
+  if (!oof && target === "numeric") {
+    // Round 1: evenly spaced across the label range, ties broken by hash so it is stable.
+    const sorted = [...rows].sort((a, b) => a.label - b.label || hashToUnit(a.id) - hashToUnit(b.id));
+    const at = Array.from({ length: Math.min(n, sorted.length) }, (_, k) => Math.round((k * (sorted.length - 1)) / Math.max(1, Math.min(n, sorted.length) - 1)));
+    return [...new Set(at)].map((i) => ({ row: sorted[i]!, p: null }));
+  }
   if (!oof) {
     // Round 1: half of each label, spread by hash so it is stable.
     const byHash = [...rows].sort((a, b) => hashToUnit(a.id) - hashToUnit(b.id));
@@ -306,21 +397,27 @@ const pickExamples = (rows: readonly DiscoverRow[], oof: number[] | null, n: num
   return [...order.slice(0, Math.floor(n / 2)), ...order.slice(order.length - Math.ceil(n / 2))].map(({ row, p }) => ({ row, p }));
 };
 
-const renderExamples = (ex: Array<{ row: DiscoverRow; p: number | null }>): string =>
-  ex[0]?.p === null
-    ? ["Example rows with their label:", ...ex.map(({ row }) => `- label ${row.label}:\n${row.text}`)].join("\n")
+const renderExamples = (ex: Array<{ row: DiscoverRow; p: number | null }>, target: DiscoverTarget): string => {
+  const label = (v: number) => (target === "numeric" ? String(Math.round(v * 100) / 100) : String(v));
+  const pred = (v: number) => v.toFixed(target === "numeric" ? 1 : 2);
+  return ex[0]?.p === null
+    ? ["Example rows with their label:", ...ex.map(({ row }) => `- label ${label(row.label)}:\n${row.text}`)].join("\n")
     : [
         "Rows, worst-predicted first. The first half is where the current questions miss by the most, the second half where they are already right, so what separates the halves is what the questions have not captured.",
-        ...ex.map(({ row, p }) => `- label ${row.label}, predicted ${p!.toFixed(2)}:\n${row.text}`),
+        ...ex.map(({ row, p }) => `- label ${label(row.label)}, predicted ${pred(p!)}:\n${row.text}`),
       ].join("\n");
+};
 
 export async function discoverFeatures(opts: DiscoverOptions): Promise<DiscoverResult> {
   const { rows, ports } = opts;
   const rounds = opts.rounds ?? 4;
   const minSpread = opts.minSpread ?? 0.05;
-  const cvOpts = { folds: opts.folds ?? 5, repeats: opts.repeats ?? 2, lambda: opts.lambda ?? 1 };
+  const cvOpts = { folds: opts.folds ?? 5, repeats: opts.repeats ?? 2, lambda: opts.lambda ?? 1, target: opts.target ?? "binary" };
   const log = opts.log ?? (() => {});
+  const target = opts.target ?? "binary";
   const y = rows.map((r) => r.label);
+  if (target === "binary" && y.some((v) => v !== 0 && v !== 1)) throw new Error("a binary target needs 0/1 labels; pass target: \"numeric\" for a score");
+  if (y.some((v) => !Number.isFinite(v))) throw new Error("every label must be a finite number");
   const groups = rows.map((r) => r.group);
 
   const answers: Record<string, number[][]> = {};
@@ -332,13 +429,13 @@ export async function discoverFeatures(opts: DiscoverOptions): Promise<DiscoverR
 
   const baseRun = cv([]);
   const baseCv = baseRun.score;
-  log(`base (${opts.baseNames.length} columns): CV log loss ${baseCv.logLoss.toFixed(4)}, AUC ${baseCv.auc.toFixed(3)}`);
+  log(`base (${opts.baseNames.length} columns): CV ${describeCv(baseCv)}`);
   let oof: number[] | null = null;
   let feedback = "";
   let stale = 0;
 
   for (let round = 1; round <= rounds; round++) {
-    const actions = (await ports.author({ round, accepted, examples: renderExamples(pickExamples(rows, oof, opts.examples ?? 40)), feedback, maxActions: opts.maxActions ?? 12 })).slice(0, opts.maxActions ?? 12);
+    const actions = (await ports.author({ round, accepted, examples: renderExamples(pickExamples(rows, oof, opts.examples ?? 40, target), target), feedback, maxActions: opts.maxActions ?? 12 })).slice(0, opts.maxActions ?? 12);
     const live = new Map(accepted.map((q) => [q.name, q]));
     const drops = actions.filter((a) => a.op === "drop" && live.has(a.target)).map((a) => a.target);
     const replacing = new Set(actions.filter((a) => a.op === "revise" && live.has(a.target)).map((a) => a.target));
@@ -374,33 +471,40 @@ export async function discoverFeatures(opts: DiscoverOptions): Promise<DiscoverR
       const trial = [...accepted];
       trial[at] = strip(q);
       const s = cv(trial).score;
-      if (s.logLoss < current.logLoss) { accepted = trial; journal.push({ round, what: "revise", name: q.name, note: `was ${q.replaces}, ${current.logLoss.toFixed(4)} → ${s.logLoss.toFixed(4)}` }); current = s; }
-      else journal.push({ round, what: "reject", name: q.name, note: `would cost ${(s.logLoss - current.logLoss).toFixed(4)}` });
+      if (s.loss < current.loss) { accepted = trial; journal.push({ round, what: "revise", name: q.name, note: `was ${q.replaces}, ${current.loss.toFixed(4)} → ${s.loss.toFixed(4)}` }); current = s; }
+      else journal.push({ round, what: "reject", name: q.name, note: `would cost ${(s.loss - current.loss).toFixed(4)}` });
     }
     for (const name of drops) {
       const trial = accepted.filter((a) => a.name !== name);
       if (trial.length === accepted.length) continue;
       const s = cv(trial).score;
-      if (s.logLoss < current.logLoss) { accepted = trial; journal.push({ round, what: "drop", name, note: `${current.logLoss.toFixed(4)} → ${s.logLoss.toFixed(4)}` }); current = s; }
-      else journal.push({ round, what: "keep", name, note: `dropping would cost ${(s.logLoss - current.logLoss).toFixed(4)}` });
+      if (s.loss < current.loss) { accepted = trial; journal.push({ round, what: "drop", name, note: `${current.loss.toFixed(4)} → ${s.loss.toFixed(4)}` }); current = s; }
+      else journal.push({ round, what: "keep", name, note: `dropping would cost ${(s.loss - current.loss).toFixed(4)}` });
     }
 
     const run = cv(accepted);
     oof = run.oof;
-    const best = history.reduce((a, h) => Math.min(a, h.logLoss), baseCv.logLoss);
-    stale = run.score.logLoss < best - 1e-4 ? 0 : stale + 1;
+    const best = history.reduce((a, h) => Math.min(a, h.loss), baseCv.loss);
+    stale = run.score.loss < best - 1e-4 ? 0 : stale + 1;
     history.push(run.score);
     snapshots.push([...accepted]);
     const { X, owner } = designMatrix(rows, accepted, answers);
-    const imp = importanceByOwner(fitLogistic(X, y, cvOpts.lambda), [...opts.baseNames, ...owner]);
+    const imp = importanceByOwner(learnerFor(target).fit(X, y, cvOpts.lambda), [...opts.baseNames, ...owner]);
+    const spreadOf = (name: string): string => {
+      const q = accepted.find((a) => a.name === name);
+      if (!q) return "";
+      const col = answers[questionId(q)]!.map((p) => encodeAnswer(q.kind, p)[0]!);
+      const m = col.reduce((a, v) => a + v, 0) / col.length;
+      return `, spread ${Math.sqrt(col.reduce((a, v) => a + (v - m) ** 2, 0) / col.length).toFixed(2)}`;
+    };
     feedback = [
-      `CV log loss (lower is better). Base columns alone: ${baseCv.logLoss.toFixed(4)} (AUC ${baseCv.auc.toFixed(3)}).`,
-      ...history.map((h, i) => `  round ${i + 1}: ${h.logLoss.toFixed(4)} (AUC ${h.auc.toFixed(3)}, ${h.columns} columns)`),
+      `Cross-validated ${target === "numeric" ? "RMSE" : "log loss"} (lower is better). Base columns alone: ${describeCv(baseCv)}.`,
+      ...history.map((h, i) => `  round ${i + 1}: ${describeCv(h)} (${h.columns} columns)`),
       "",
-      "Importance share of every column the model reads, base columns included. A question with a low share is not earning its place; revise or drop it.",
-      ...Object.entries(imp).sort((a, b) => b[1] - a[1]).map(([k, v]) => `  ${k}: ${(100 * v).toFixed(1)}%${live.has(k) || accepted.some((a) => a.name === k) ? "" : opts.baseNames.includes(k) ? " (base)" : ""}`),
+      "Importance share of every column the model reads, base columns included, and the spread of each question's answer across rows. A question with a low share or a low spread is not earning its place; revise or drop it.",
+      ...Object.entries(imp).sort((a, b) => b[1] - a[1]).map(([k, v]) => `  ${k}: ${(100 * v).toFixed(1)}%${opts.baseNames.includes(k) && !accepted.some((a) => a.name === k) ? " (base)" : spreadOf(k)}`),
     ].join("\n");
-    log(`round ${round}: ${fresh.length} answered, ${accepted.length} kept, CV ${run.score.logLoss.toFixed(4)} AUC ${run.score.auc.toFixed(3)}`);
+    log(`round ${round}: ${fresh.length} answered, ${accepted.length} kept, CV ${describeCv(run.score)}`);
     for (const j of journal.filter((j) => j.round === round)) log(`  ${j.what.padEnd(7)}${j.name.padEnd(40)}${j.note}`);
     if (opts.patience && stale >= opts.patience) { log(`stopping: no improvement for ${stale} rounds`); break; }
   }
