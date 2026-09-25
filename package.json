@@ -1,0 +1,43 @@
+{
+  "name": "@rivers/decision-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Let models estimate, let code decide, let people correct it later: a declared-DAG core for traceable, tunable LLM features. Host-agnostic — every side effect goes through a port.",
+  "keywords": [
+    "llm",
+    "decision-pipeline",
+    "dag",
+    "gating",
+    "evaluation",
+    "experiments",
+    "langfuse",
+    "typescript"
+  ],
+  "homepage": "https://github.com/dipseth/decision-pipeline#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dipseth/decision-pipeline.git"
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts",
+    "./jsonata": "./src/jsonata.ts"
+  },
+  "scripts": {
+    "lint": "echo 'no lint configured'",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "jsonata": "^2.2.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  }
+}

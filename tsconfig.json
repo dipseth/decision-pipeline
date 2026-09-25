@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "//": "Deliberately standalone — NOT extending @rivers/typescript-config. This package is meant to be extractable as a git submodule (#321), so it must type-check with nothing but its own devDependencies. Options mirror @rivers/typescript-config/base.json.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["esnext"],
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "noEmit": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules"]
+}
