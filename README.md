@@ -18,7 +18,7 @@ Most LLM features start life as a chain: ask a model, trust its answer, save it.
 
 A **decision pipeline** is a small, declared graph that works differently:
 
-- 🎲 **Models estimate.** A `decide` node asks a model for *probabilities* ("how likely is this a refund request?"), never for the answer itself.
+- 🎲 **Models estimate.** A `decide` node asks a model for *probabilities* ("how likely is this a refund request?"), never for the answer itself. We use [Jev](#jev-llms-and-code-who-does-what), a calibrated evaluator built for exactly this.
 - 🚦 **Code decides.** A **gate** is plain code that turns those probabilities into a branch, using thresholds you can tune. Every threshold it used is recorded.
 - 💸 **The big model is the fallback.** A generative model runs only on the branch that needs it. When the cheap path is confident, nothing is generated at all.
 - 👍 **People close the loop.** Every pipeline declares where a human signal lands (a 👍, a rating, a correction). It lands on an *earlier* node and improves the next run. No run ever waits for a person.
@@ -180,6 +180,143 @@ Only a code gate can branch. That is the whole idea: models inform the decision,
 
 A node that fails declares what happens next with `onFailure`: `fallback` (run a backup body), `skip`, `revert` (pass the input through unchanged, which suits a validator), or `fail` (the default). Every node carries a `version`. The run's version is a hash of every node version, prompt version, threshold value and experiment arm that resolved at run start, so a record always names the exact configuration that produced it.
 
+## Jev, LLMs and code: who does what
+
+The `decide` port accepts any model that returns probabilities. Ours is [Jev](https://docs.typesafe.ai) from TypeSafe, a calibrated evaluator. You send it one **state** (a JSON object) and many small **questions**, and it answers every question with a probability distribution in a single request. It never writes prose, which is exactly what a `decide` node wants.
+
+Each of the three does the job it is best at:
+
+| | Good at | In a pipeline |
+|---|---|---|
+| **Jev** | Calibrated snap judgments over a fixed state: yes/no, pick one of N, rate 1–5. Cheap (input tokens only) and fast, even with dozens of questions | `decide` nodes: classify, verify, rank |
+| **An LLM** | Writing, reasoning over messy input, using tools | `generate` nodes, only on the branch that needs one, and the [probe writer](#probes-let-an-llm-write-jevs-questions) |
+| **Code** | Arithmetic, counting, thresholds, anything that must be exact and replayable | gates, transforms, validators, and combining Jev's answers |
+
+A decide port backed by Jev is short:
+
+```ts
+import type { DecidePort } from "@rivers/decision-pipeline";
+
+type JevAnswer = { noul?: number; probabilities?: Record<string, number> };
+
+export const jevDecide: DecidePort = async (req) => {
+  const probes = Object.fromEntries(
+    Object.entries(req.probes).map(([slot, { why, ...question }]) => [slot, question]), // `why` is for humans only
+  );
+  const questions = { ...loadQuestions(req.questions), ...probes };  // your fixed set + this run's probes
+  const res = await fetch("https://api.typesafe.ai/v1/systemone", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${process.env.TYPESAFE_API_KEY}` },
+    body: JSON.stringify({ model: "jev-1.13.0", state: buildState(req.input), questions }),
+  });
+  const { answers, usage } = (await res.json()) as {
+    answers: Record<string, JevAnswer>;
+    usage: { input_tokens: number };
+  };
+
+  const distributions: Record<string, number[]> = {};
+  const distributionOptions: Record<string, string[]> = {};
+  for (const [key, a] of Object.entries(answers)) {
+    if (typeof a.noul === "number") { distributions[key] = [a.noul]; distributionOptions[key] = ["true"]; }
+    else if (a.probabilities) {
+      distributionOptions[key] = Object.keys(a.probabilities);
+      distributions[key] = Object.values(a.probabilities);
+    }
+  }
+  return { distributions, distributionOptions, costUsd: usage.input_tokens * 0.042e-6 };
+};
+```
+
+What we learned running Jev behind gates in production:
+
+- **One state, many questions, one request.** Questions are answered independently of each other, so extra questions are nearly free. Never fan out N calls over the same material. Put everything in one state and point each question at its part with a backticked path: ``is `ingredients[3]` a leavening agent?``
+- **Ask atomic questions and combine them in code.** "Is this the dish they want?" is several questions at once. Ask the literal facts separately (is the excluded ingredient present? does the technique match?) and weight them in a `code` node. Those per-question probabilities also make good training features.
+- **Gate on confidence, and don't reuse thresholds across question types.** A yes/no (`noul`) probability is absolute, while a `choice` is relative to its options. The same question asked both ways gives different numbers, so tune each threshold against its own question.
+- **Math, counting and dates go in code**, not in a question. So does filtering: send Jev only the part of the state the questions are about.
+- **Pin the model version** (`jev-1.13.0`, not `jev-latest`) once thresholds are tuned. Aliases move, and a threshold tuned on one model version means something else on the next.
+
+## Probes: let an LLM write Jev's questions
+
+A `decide` node's `questions` are fixed: the same set on every run. That is what makes a gate tunable, but a fixed set can't ask about the one odd thing in *this* input: a recipe that calls itself Thai but uses capers and cream, or a support ticket that mentions two orders.
+
+**Probes** fill that gap. An upstream `generate` node, the **probe writer**, looks at the same state Jev will see and writes a few questions about what is ambiguous or easy to get wrong. The runtime validates them, Jev answers them in the same request as the fixed questions, and a later writer reads the answers as evidence.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant R as runtime
+  participant W as probe writer (LLM)
+  participant J as Jev
+  participant T as writer (LLM)
+  R->>W: the state + the goal + what's already settled
+  W-->>R: up to N questions, each pointing at a state path
+  Note over R: validate: schema, cap, duplicates,<br/>length, a real state path.<br/>Drops are recorded with a reason
+  R->>J: ONE request: the state + fixed questions + probes
+  J-->>R: a probability per question
+  Note over R: gates see the fixed answers only
+  R->>T: the input + the probe answers, as evidence
+  T-->>R: the fact
+```
+
+Declaring it is two nodes and an edge:
+
+```ts
+probe_gen: { kind: "generate", prompt: "jev-probe-writer", route: "probe-writer", onFailure: "skip", version: "1" },
+probe:     { kind: "decide", probes: { from: "probe_gen", max: 4, paths: ["recipe"] }, onFailure: "skip", version: "1" },
+// edges: probe_gen → probe → the writer that reads the answers
+```
+
+The probe writer returns plain JSON, one entry per question, in Jev's own question types:
+
+```json
+[
+  { "type": "noul", "instructions": "Does `recipe.ingredients` include capers?", "why": "capers point away from Thai" },
+  { "type": "choice", "instructions": "How is the custard in `recipe.steps` thickened?",
+    "criteria": { "egg_yolks": "yolks, tempered", "starch": "flour or cornstarch", "neither": "neither" } }
+]
+```
+
+The guarantees that make this safe:
+
+| Guarantee | How |
+|---|---|
+| A bad probe never reaches Jev | schema, a hard cap (8), duplicates, length, at most 12 choice options, and every probe must name a backticked state path from `paths`. Every drop is recorded with a reason |
+| Probes never tune a gate | gate bodies see `args.probes = {}` and `interpret` sees fixed questions only, so a threshold is only ever tuned against questions that exist on every run |
+| Replayable | the probe **text** is on the run record (`nodes[].probes.asked`), because no prompt version could recover it |
+| Bounded features | only aggregates are recorded as features (`<node>.probes.{asked,answered,dropped,min_margin,max_entropy,mean_entropy}`), since `probe_0` means something different on every run |
+| `why` stays private | the writer's reason for each probe is kept for the human reading the trace and never sent to Jev |
+
+Two lessons from production:
+
+- **Never let the writer re-ask the decision.** Our first probe-writer prompt produced about one mini re-classification per recipe: a `choice` whose options included the answer Jev had already ranked first. Jev agreed with itself, the writer downstream read that as corroboration, and confidence inflated. The prompt now forbids asking the decision "in any wording or as a choice among its candidate answers" and asks for observable facts instead: is X present, is technique Y used, does Z say W. The good probes were facts like capers vs chiles (1.0) or a separating-custard technique (0.96).
+- **Probes have to earn their cost, like any change.** We ran a locked [trial](#improving-a-pipeline-safely) on cuisine classification: the same pipeline with probes on and off, 180 held-out recipes, graded by a blind judge. Accuracy was identical (difference 0.000, interval [−0.027, 0.027]), and probes cost 27% more, so cuisine runs without them. Probes stay in pipelines where they add evidence, such as verifying a rewritten recipe line by line.
+
+## What you see in Langfuse
+
+The core imports no tracing vendor. Our host binds the `tracer`, `scores`, `queue` and `dataset` ports to [Langfuse](https://langfuse.com), and one run becomes one trace. This is a cuisine run that took the `tail` branch, with probes on:
+
+```
+pipeline:cuisine                        trace · session "cuisine-<recipeId>" · tags: tail, route:tail
+│   metadata: cuisine_route=tail · cuisine_version=<hash> · cuisine_run_id · run_key · cost_usd
+│             skipped=[jev_leaf, jev_only, gemini_flat]
+│   output:   the fact itself (the cuisine), not runtime bookkeeping
+├── taxonomy       span · read
+├── decide         span · decide ─ the batched Jev ranking call, in its own trace, cost split pro rata
+├── evidence       span · code
+├── route          span · gate  ─ branch=tail · branch_reason · thresholds={…}
+├── probe_gen      span · generate
+│   └── cuisine-probe-writer    generation · prompt "jev-probe-writer" vN · output: the probes
+├── probe          span · decide ─ probes_asked=3 · probes_dropped=0
+│   └── cuisine-probe           generation · Jev · input: state + probe_0…probe_2 · output: the answers
+├── tail           span · generate ─ reads the probe answers as evidence
+└── persist        span · store
+scores:  a 👍/👎 or a correction lands here, on this trace
+```
+
+Every node span carries `step_id`, `kind`, `node_version`, `input_hash` and `cost_usd`, plus `branch` and `thresholds` on a gate and `cache: "hit"` when a node's result came from the cache. Skipped branches have no span; they are listed on the root with their reason, so a trace reader never has to guess why a node is missing. The Jev calls are Langfuse **generations**, so the state, every question and every distribution are one click away, and the question set's prompt version is linked.
+
+That gives a hand reader three ways in: filter by **tag** (`route:tail`, `shadow`, `arm:<experiment>=<arm>`), open a **session** to see every run for one item, or start from a **score** and walk back to the branch and thresholds that produced the answer.
+
 ## Ports: bring your own everything
 
 The core imports no model SDK, database or tracing vendor. Every side effect goes through a **port** that you supply:
@@ -320,23 +457,6 @@ The compiler never throws. It returns `{ pipeline, problems }` with every proble
 </details>
 
 <details>
-<summary><b>Probes: questions a model writes for this run</b></summary>
-<br>
-
-A `decide` node's `questions` are fixed. **Probes** are extra questions that an upstream `generate` node writes for *this* run after looking at the input. They are asked in the same `decide` call and used as evidence by later nodes.
-
-```ts
-probe_gen: { kind: "generate", prompt: "probe-writer", route: "probe-writer", onFailure: "skip", version: "1" },
-probe:     { kind: "decide", probes: { from: "probe_gen", max: 4, paths: ["recipe"] }, onFailure: "skip", version: "1" },
-```
-
-- **A bad probe never reaches the model.** Probes are checked for schema, count, duplicates, length, and a reference to a real state path. Every dropped probe is recorded with a reason.
-- **Replayable.** The probe text is on the record.
-- **Never tunes a gate.** Gates see `args.probes = {}`, so a gate only ever depends on fixed questions.
-- **Bounded features.** Only aggregates are recorded (`asked`, `answered`, `dropped`, margins, entropy).
-</details>
-
-<details>
 <summary><b>Experiments are patches</b></summary>
 <br>
 
@@ -400,7 +520,7 @@ Feedback attaches to an attempt (a score can only attach to a trace), but the du
 </details>
 
 <details>
-<summary><b>Mapping onto Langfuse</b></summary>
+<summary><b>The full Langfuse mapping</b></summary>
 <br>
 
 The core imports no tracing vendor, but every concept was designed to bind to a real [Langfuse](https://langfuse.com) object:
