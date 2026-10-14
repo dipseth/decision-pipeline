@@ -38,3 +38,5 @@ export * from "./hypothesis";
 export * from "./trial";
 export * from "./discover";
 export * from "./learned";
+export * from "./diagram";
+export * from "./explain";

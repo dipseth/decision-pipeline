@@ -517,6 +517,7 @@ const nodeToJSON = (id: string, n: PipelineNode<unknown>): Record<string, unknow
     onFailure: n.onFailure ?? "fail",
     cache: n.cache ?? "none",
   };
+  if (n.timeoutMs) base.timeoutMs = n.timeoutMs;
   if (n.describe) base.describe = n.describe;
   if (n.inputs) base.inputs = { ...n.inputs };
   switch (n.kind) {

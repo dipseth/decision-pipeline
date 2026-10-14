@@ -214,6 +214,13 @@ interface NodeCommon<I> {
    */
   inputs?: Record<string, string>;
   onFailure?: OnFailure;
+  /**
+   * The node's deadline. Past it the node fails with NodeTimeoutError — so
+   * `onFailure` decides what the run does — and `signal` aborts for the body
+   * and its port. A body that ignores the signal keeps running unheard: its
+   * late result is discarded, never written into the run.
+   */
+  timeoutMs?: number;
   cache?: CacheMode;
   /** Used only when `onFailure: "fallback"`. */
   fallback?: NodeBody<I>;

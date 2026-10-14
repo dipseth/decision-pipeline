@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runPipeline, applyOverride } from "./run";
-import { MissingPortError, NodeFailedError } from "./errors";
+import { MissingPortError, NodeFailedError, NodeSkipped, NodeTimeoutError } from "./errors";
 import { buildScopeContext } from "./scope";
 import { testPorts } from "./testing";
 import {
@@ -397,11 +397,94 @@ describe("onFailure", () => {
     );
   });
 
+  it("a NodeSkipped is a skip, not a failure — even under `fail` — and its span closes cleanly", async () => {
+    const ports = testPorts({
+      decide: {
+        classify: () => {
+          throw new NodeSkipped("classifier switched off");
+        },
+      },
+    });
+    const threw: string[] = [];
+    const span = ports.tracer.span;
+    ports.tracer.span = (opts, fn) =>
+      span(opts, async (h) => {
+        try {
+          return await fn(h);
+        } catch (err) {
+          threw.push(opts.name);
+          throw err;
+        }
+      });
+
+    const result = await runPipeline(buildScalePipeline(), input, ports).catch((err: unknown) => err);
+
+    expect(result).not.toBeInstanceOf(NodeFailedError);
+    expect(threw).not.toContain("classify");
+    expect(ports.tracer.span_("classify")?.metadata.skipped).toBe("classifier switched off");
+  });
+
   it("names the missing port rather than failing obscurely", async () => {
     const scale = buildScalePipeline();
     await expect(runPipeline(scale, input, { scope: () => ({}) })).rejects.toThrow(
       MissingPortError,
     );
+  });
+});
+
+describe("a node deadline", () => {
+  const withNode = (id: "writer" | "guard", over: Record<string, unknown>) => {
+    const scale = buildScalePipeline();
+    return {
+      ...scale,
+      nodes: { ...scale.nodes, [id]: { ...scale.nodes[id], ...over } },
+    } as typeof scale;
+  };
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it("fails the node past `timeoutMs`, and aborts the signal its port was given", async () => {
+    let seen: AbortSignal | undefined;
+    const ports = writerPorts({
+      generate: {
+        writer: (request: { signal?: AbortSignal }) => {
+          seen = request.signal;
+          return new Promise(() => {});
+        },
+      },
+    });
+
+    const err = await runPipeline(withNode("writer", { timeoutMs: 20 }), input, ports).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(NodeFailedError);
+    expect((err as NodeFailedError).cause).toBeInstanceOf(NodeTimeoutError);
+    expect(seen?.aborted).toBe(true);
+  });
+
+  it("hands the timeout to `onFailure`, and never lets the late answer into the run", async () => {
+    // `guard` reverts on failure: past its deadline the writer's output stands.
+    const late = { ...writerOutput, scalingNotes: ["the guard, too late"] };
+    const ports = writerPorts();
+    const result = await runPipeline(
+      withNode("guard", { timeoutMs: 20, run: () => wait(60).then(() => late) }),
+      input,
+      ports,
+    );
+    const guard = result.record.nodes.find((n) => n.id === "guard");
+    expect(guard?.error).toContain("20 ms deadline");
+    expect(result.output.scalingNotes).toEqual(writerOutput.scalingNotes);
+
+    await wait(80);
+    expect(guard?.branch).toBe("reverted");
+    expect(result.output.scalingNotes).toEqual(writerOutput.scalingNotes);
+  });
+
+  it("leaves a node that answers in time alone", async () => {
+    const ports = writerPorts();
+    const result = await runPipeline(withNode("writer", { timeoutMs: 5_000 }), input, ports);
+    expect(result.record.nodes.find((n) => n.id === "writer")?.error).toBeUndefined();
+    expect(result.output.scalingNotes).toEqual(writerOutput.scalingNotes);
   });
 });
 

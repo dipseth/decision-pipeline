@@ -30,6 +30,7 @@
 
 import type { RunRecord } from "./record";
 import type { Rank, Trigger } from "./types";
+import type { RunRecordNode } from "./record";
 
 export interface RunStartEvent {
   pipeline: string;
@@ -89,15 +90,38 @@ export interface RunEndEvent {
 }
 
 /**
+ * A run that threw. There is no `RunRecord` — the fact was never produced —
+ * so this carries what the run had accumulated when it died: the nodes it
+ * considered (the one that killed it last, with its `error`) and what they
+ * cost.
+ */
+export interface RunFailEvent {
+  pipeline: string;
+  runId: string | null;
+  runKey: string;
+  version: string;
+  group: string;
+  trigger: Trigger;
+  arms: Record<string, string>;
+  writesFact: boolean;
+  error: string;
+  /** The node whose failure ended the run; null when it died outside a node. */
+  failedNode: string | null;
+  nodes: RunRecordNode[];
+  costUsd: number;
+  ms: number;
+}
+
+/**
  * Every node the runtime CONSIDERED gets exactly one `onNodeStart` and exactly
  * one `onNodeEnd`, skips included — a watcher that pairs them can rely on that
  * rather than reconstructing which halves are missing.
  *
- * `onRunEnd` fires on success only. A run that throws has no `RunRecord` to
- * hand over: the record is assembled after the producing node resolves, so
- * there is nothing to report but the exception the caller already receives.
- * A watcher that needs failed-run cost needs a `RunRecord` built on the error
- * path first — deliberately not done here.
+ * A run that got as far as `onRunStart` ends in exactly one of `onRunEnd`
+ * (it produced its fact; here is the record) or `onRunFail` (it threw; here
+ * is what it had spent). `onRunFail` fires after the root span has closed and
+ * before the caller sees the exception. A failed run never reaches the record
+ * sink: a training table of runs that answered must not grow rows that didn't.
  */
 export interface RunObserver {
   /** For logs. Also what a warning names when this observer throws. */
@@ -106,6 +130,7 @@ export interface RunObserver {
   onNodeStart?(event: NodeStartEvent): void | Promise<void>;
   onNodeEnd?(event: NodeEndEvent): void | Promise<void>;
   onRunEnd?(event: RunEndEvent): void | Promise<void>;
+  onRunFail?(event: RunFailEvent): void | Promise<void>;
 }
 
 /**
@@ -137,8 +162,13 @@ export async function notifyObservers(
 ): Promise<void>;
 export async function notifyObservers(
   observers: readonly RunObserver[] | undefined,
-  hook: "onRunStart" | "onNodeStart" | "onNodeEnd" | "onRunEnd",
-  event: RunStartEvent | NodeStartEvent | NodeEndEvent | RunEndEvent,
+  hook: "onRunFail",
+  event: RunFailEvent,
+): Promise<void>;
+export async function notifyObservers(
+  observers: readonly RunObserver[] | undefined,
+  hook: "onRunStart" | "onNodeStart" | "onNodeEnd" | "onRunEnd" | "onRunFail",
+  event: RunStartEvent | NodeStartEvent | NodeEndEvent | RunEndEvent | RunFailEvent,
 ): Promise<void> {
   if (!observers || observers.length === 0) return;
   for (const observer of observers) {

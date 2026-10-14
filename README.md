@@ -63,6 +63,47 @@ flowchart LR
 
 <sub>Blue: a model estimates · Amber: code decides · Purple: a model writes · Green: saved · Dotted: a human signal, landing on a later run.</sub>
 
+## Draw any pipeline
+
+The same graph a manifest declares can be drawn from its JSON, with no dependencies:
+
+```ts
+import { renderPipelineSvg } from "@rivers/decision-pipeline";
+
+const svg = renderPipelineSvg(pipeline.toJSON(), { title: "Scale" });
+// one SVG string — write it to a file (`standalone: true` embeds light/dark),
+// or inline it in a page, where text is `currentColor` and the tints are
+// `--dp-*` custom properties. Every node, edge, branch and feedback edge
+// carries a data-* attribute, so a run view can light up the path it took.
+```
+
+Two pipelines from production, drawn this way. Left, **Scale**: a fast classifier, code arithmetic, and a writer model only when the wording has to change; the cook's rating and any flagged line come back to the gate and the classifier. Right, **Cuisine tagging**: one gate with four branches, a probe writer feeding a second decide node, and three feedback edges of different forms (a score, a feature, a review queue) from one chip.
+
+<p align="center">
+  <img src="assets/pipeline-scale.svg" alt="The Scale pipeline: classify → table → gate ⑂ direct | writer → agent ⑂ quick | full → guard → changes → persist, with the scaling-notes surface feeding back" width="46%">
+  &nbsp;
+  <img src="assets/pipeline-cuisine.svg" alt="The cuisine pipeline: taxonomy → decide → evidence → route ⑂ jev_leaf | jev_only | tail | gemini_flat → persist, with the cuisine-chip surface feeding back three ways" width="52%">
+</p>
+
+Read it top to bottom: every edge out of a node leaves by one trunk, every edge in arrives by one drop, and an edge that skips layers runs down a rail at the left with a tap into each layer it feeds — a node feeding six others is one line. The branch that reaches a node sits on its doorstep. The human surface is below the run; its dashed rail at the right climbs back to the node the signal lands on.
+
+## Explain any pipeline
+
+The same JSON can be explained in plain words, for a reader on a scale — a five-year-old, a ten-year-old, a fifteen-year-old, an engineer. The package builds the brief and the prompt; you bring the model:
+
+```ts
+import { explainPipeline, explainCacheKey } from "@rivers/decision-pipeline";
+
+const json = pipeline.toJSON();
+const key = explainCacheKey(json, { level: "eli10", language: "es" });
+// "scale:4f1c…:eli10:es" — pipeline · version · level · language
+
+const { text } = await explainPipeline(json, { level: "eli10", title: "Scale", languageName: "Spanish" },
+  async ({ system, user }) => (await myModel.generate({ system, prompt: user })).text);
+```
+
+`explainVersion(json)` hashes what the pipeline *does* — nodes, gates, thresholds, edges, feedback — and ignores timeouts, cache policy and eval settings, so an explanation is cached per version of the pipeline and written at most once per level and language. `explainBrief(json)` is the manifest written out for a model, the same at every level; the level changes only the instructions. `EXPLAIN_SYSTEM_PROMPT` is the default system half, for a host that manages its prompts elsewhere.
+
 ## Quick start
 
 Not on npm yet. Install it from GitHub:

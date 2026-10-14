@@ -36,6 +36,7 @@ import type {
   NodeEndEvent,
   NodeStartEvent,
   RunEndEvent,
+  RunFailEvent,
   RunObserver,
   RunStartEvent,
 } from "./observers";
@@ -223,7 +224,8 @@ export type ObservedEvent =
   | { hook: "onRunStart"; event: RunStartEvent }
   | { hook: "onNodeStart"; event: NodeStartEvent }
   | { hook: "onNodeEnd"; event: NodeEndEvent }
-  | { hook: "onRunEnd"; event: RunEndEvent };
+  | { hook: "onRunEnd"; event: RunEndEvent }
+  | { hook: "onRunFail"; event: RunFailEvent };
 
 export interface CollectingObserver {
   observer: RunObserver;
@@ -265,6 +267,9 @@ export const collectingObserver = (name = "collecting"): CollectingObserver => {
       onRunEnd: (event) => {
         events.push({ hook: "onRunEnd", event });
       },
+      onRunFail: (event) => {
+        events.push({ hook: "onRunFail", event });
+      },
     },
   };
 };
@@ -280,6 +285,7 @@ export const throwingObserver = (name = "throwing"): RunObserver => {
     onNodeStart: boom,
     onNodeEnd: boom,
     onRunEnd: boom,
+    onRunFail: boom,
   };
 };
 

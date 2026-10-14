@@ -25,7 +25,13 @@ import { resolveInbound } from "./graph";
 import { resolveThresholds, thresholdValues, type ResolvedThreshold } from "./thresholds";
 import { resolveTools, DEFAULT_TOOL_SELECT_THRESHOLD, type ResolvedTools } from "./tools";
 import { shortHash } from "./hash";
-import { MissingPortError, NodeFailedError, UnknownBranchError } from "./errors";
+import {
+  MissingPortError,
+  NodeFailedError,
+  NodeSkipped,
+  NodeTimeoutError,
+  UnknownBranchError,
+} from "./errors";
 import { notifyObservers, recordSinkObserver, type RunObserver } from "./observers";
 import type { DecisionPipeline } from "./define";
 import type { PipelinePorts, RunOptions, SpanHandle, TracePort } from "./ports";
@@ -213,8 +219,11 @@ export const runPipeline = async <I, O>(
 
   const inputHash = shortHash(input);
 
+  /** Set once the run has started: what a watcher is told if it then throws. */
+  let reportFailure: ((err: unknown) => Promise<void>) | null = null;
+
   // --- 4. One root observation. Every node is a child span.
-  return tracer.root(
+  const settled = tracer.root(
     {
       name: `pipeline:${pipeline.id}`,
       input,
@@ -279,6 +288,23 @@ export const runPipeline = async <I, O>(
       let lastGateConfidence: number | null = null;
       /** Tags earned during the run, applied to the root once at the end. */
       const earnedTags = new Set<string>();
+
+      reportFailure = (err) =>
+        notifyObservers(observers, "onRunFail", {
+          pipeline: pipeline.id,
+          runId,
+          runKey,
+          version,
+          group,
+          trigger,
+          arms,
+          writesFact,
+          error: err instanceof Error ? err.message : String(err),
+          failedNode: err instanceof NodeFailedError ? err.nodeId : null,
+          nodes: recordNodes,
+          costUsd,
+          ms: clock() - startedAt,
+        });
 
       /** Every node the runtime considered gets a start and an end, skips included. */
       const notifyNode = async (
@@ -349,6 +375,26 @@ export const runPipeline = async <I, O>(
 
         const nodeInputHash = shortHash({ primary, from });
         const thresholds = thresholdNumbers[id] ?? {};
+        // A node with a deadline gets its own signal: the run's, or the
+        // deadline, whichever comes first.
+        const deadline = n.timeoutMs ? new AbortController() : null;
+        const signal = deadline
+          ? options.signal
+            ? AbortSignal.any([options.signal, deadline.signal])
+            : deadline.signal
+          : options.signal;
+        let timedOut = false;
+        /**
+         * Await a body or a port, then refuse the result if the deadline has
+         * passed — the run has moved on, and a late answer must not be
+         * written into it (nor its cost into a record already handed over).
+         */
+        const inTime = async <T>(pending: T | Promise<T>): Promise<T> => {
+          const value = await pending;
+          if (timedOut) throw new NodeTimeoutError(id, n.timeoutMs ?? 0);
+          return value;
+        };
+
         const args: NodeRunArgs<I> = {
           input,
           from,
@@ -359,7 +405,7 @@ export const runPipeline = async <I, O>(
           node: { id, version: n.version },
           branches: verdicts,
           probes: isGateNode(n) ? NO_PROBES : probesByNode,
-          signal: options.signal,
+          signal,
         };
 
         const cacheMode = n.cache ?? "none";
@@ -406,14 +452,30 @@ export const runPipeline = async <I, O>(
           span.setOutput(value);
         };
 
+        // A body that throws NodeSkipped chose not to run: caught INSIDE the
+        // span, so the tracer closes it normally instead of marking an error.
+        let skipReason: string | null = null;
+        const skippable =
+          (body: (span: SpanHandle) => Promise<void>) =>
+          async (span: SpanHandle): Promise<void> => {
+            try {
+              await body(span);
+            } catch (err) {
+              if (!(err instanceof NodeSkipped)) throw err;
+              skipReason = err.message;
+              span.setMetadata({ step_id: id, kind: n.kind, node_version: n.version, skipped: err.message });
+              span.setOutput({ skipped: err.message });
+            }
+          };
+
         try {
-          await tracer.span(
+          const body = tracer.span(
             {
               name: `${id}`,
               input: { primary, from: Object.keys(from) },
               metadata: { step_id: id, kind: n.kind, node_version: n.version },
             },
-            async (span) => {
+            skippable(async (span) => {
               if (cacheHit) {
                 entry.cached = true;
                 finish(cached, span);
@@ -422,7 +484,7 @@ export const runPipeline = async <I, O>(
 
               switch (n.kind) {
                 case "read": {
-                  finish(await n.load(args), span);
+                  finish(await inTime(n.load(args)), span);
                   return;
                 }
 
@@ -448,7 +510,7 @@ export const runPipeline = async <I, O>(
                       );
                     }
                   }
-                  const result = await ports.decide({
+                  const result = await inTime(ports.decide({
                     nodeId: id,
                     nodeVersion: n.version,
                     questions: n.questions ?? null,
@@ -459,8 +521,8 @@ export const runPipeline = async <I, O>(
                     from,
                     in: bound,
                     batched: n.batched === true,
-                    signal: options.signal,
-                  });
+                    signal,
+                  }));
                   // The record keeps EVERY distribution (replay needs the
                   // probes too); gates, `interpret` and the per-question
                   // features see only the static questions.
@@ -502,7 +564,7 @@ export const runPipeline = async <I, O>(
                     grants: ctx.grants,
                     registry: ports.toolRegistry,
                   });
-                  const result = await ports.generate({
+                  const result = await inTime(ports.generate({
                     nodeId: id,
                     nodeVersion: n.version,
                     prompt: n.prompt,
@@ -516,8 +578,8 @@ export const runPipeline = async <I, O>(
                     ctx,
                     branches: verdicts,
                     probes: probesByNode,
-                    signal: options.signal,
-                  });
+                    signal,
+                  }));
                   entry.route = n.route;
                   entry.tools = {
                     offered: tools.offered,
@@ -535,7 +597,7 @@ export const runPipeline = async <I, O>(
 
                 case "code": {
                   if (isGateNode(n)) {
-                    const gate = normalizeGate(await n.run(args));
+                    const gate = normalizeGate(await inTime(n.run(args)));
                     if (!n.branches.includes(gate.branch)) {
                       throw new UnknownBranchError(id, gate.branch, n.branches);
                     }
@@ -565,13 +627,13 @@ export const runPipeline = async <I, O>(
                     entry.thresholds = thresholds;
                     span.setMetadata({ thresholds });
                   }
-                  finish(await n.run(args), span);
+                  finish(await inTime(n.run(args)), span);
                   return;
                 }
 
                 case "store": {
                   if (!ports.store) throw new MissingPortError("store", id, "store");
-                  await ports.store({
+                  await inTime(ports.store({
                     nodeId: id,
                     target: n.target,
                     scope: n.scope,
@@ -585,13 +647,42 @@ export const runPipeline = async <I, O>(
                     decidedBy: pipeline.decidedBy,
                     writesFact,
                     ctx,
-                  });
+                  }));
                   finish(primary, span);
                   return;
                 }
               }
-            },
+            }),
           );
+          if (deadline && n.timeoutMs) {
+            const ms = n.timeoutMs;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const expired = new Promise<never>((_, reject) => {
+              timer = setTimeout(() => {
+                timedOut = true;
+                deadline.abort();
+                reject(new NodeTimeoutError(id, ms));
+              }, ms);
+            });
+            // Whatever the abandoned body does next is nobody's to hear.
+            body.catch(() => {});
+            try {
+              await Promise.race([body, expired]);
+            } finally {
+              clearTimeout(timer);
+            }
+          } else {
+            await body;
+          }
+
+          if (skipReason !== null) {
+            entry.ms = clock() - nodeStart;
+            entry.skipped = skipReason;
+            recordNodes.push(entry);
+            skipped[id] = skipReason;
+            await notifyNode("onNodeEnd", entry, { cacheHit });
+            continue;
+          }
 
           if (!cacheHit && cacheMode !== "none") {
             const value = outputs.get(id);
@@ -618,8 +709,8 @@ export const runPipeline = async <I, O>(
             recordNodes.push(entry);
             // Before the throw: a watcher that never hears the end of the node
             // that killed the run is a watcher blind to exactly the run worth
-            // looking at. (The RUN's own end still does not fire — see
-            // ./observers on why a failed run has no record to hand over.)
+            // looking at. (The run's own `onRunFail` follows, once the root
+            // span has closed.)
             await notifyNode("onNodeEnd", entry, { cacheHit });
             throw err instanceof NodeFailedError ? err : new NodeFailedError(id, err);
           }
@@ -640,7 +731,11 @@ export const runPipeline = async <I, O>(
             continue;
           }
           // fallback
-          const value = n.fallback ? await n.fallback(args) : primary;
+          // The node's own signal may be the deadline that just fired; the
+          // fallback answers to the run's.
+          const value = n.fallback
+            ? await n.fallback({ ...args, signal: options.signal })
+            : primary;
           outputs.set(id, value);
           ran.add(id);
           recordNodes.push(entry);
@@ -747,6 +842,12 @@ export const runPipeline = async <I, O>(
       };
     },
   );
+  try {
+    return await settled;
+  } catch (err) {
+    await (reportFailure as ((err: unknown) => Promise<void>) | null)?.(err);
+    throw err;
+  }
 };
 
 // ---------------------------------------------------------------------------

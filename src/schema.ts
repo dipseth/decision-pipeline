@@ -91,6 +91,7 @@ export const nodeDeclarationSchema = z
     version: z.string().min(1),
     inputs: z.record(z.string(), z.string().min(1)).optional(),
     onFailure: onFailureSchema.optional(),
+    timeoutMs: z.number().int().positive().optional(),
     cache: cacheSchema.optional(),
     describe: z.string().optional(),
     // read

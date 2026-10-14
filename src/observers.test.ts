@@ -230,8 +230,47 @@ describe("a failed run", () => {
       (e) => e.hook === "onNodeEnd" && e.event.nodeId === "changes",
     );
     expect(end?.hook === "onNodeEnd" && end.event.error).toContain("changes blew up");
-    // Documented limit: a run with no record has no `onRunEnd` to give.
+    // No record, so no `onRunEnd` — the run ends in `onRunFail` instead, last.
     expect(ports.observed.some((e) => e.hook === "onRunEnd")).toBe(false);
+    const fail = ports.observed[ports.observed.length - 1];
+    if (fail?.hook !== "onRunFail") throw new Error("expected onRunFail last");
+    expect(fail.event.failedNode).toBe("changes");
+    expect(fail.event.error).toContain("changes blew up");
+    // What the run had done when it died: every node up to the one that killed it.
+    expect(fail.event.nodes[fail.event.nodes.length - 1]?.id).toBe("changes");
+    expect(fail.event.nodes.length).toBeGreaterThan(1);
+    expect(fail.event.costUsd).toBe(
+      fail.event.nodes.reduce((sum, node) => sum + node.cost_usd, 0),
+    );
+  });
+
+  it("a failed run never reaches the record sink", async () => {
+    const ports = writerPorts();
+    const scale = buildScalePipeline();
+    const exploding = {
+      ...scale,
+      nodes: {
+        ...scale.nodes,
+        changes: {
+          ...scale.nodes.changes,
+          run: () => {
+            throw new Error("changes blew up");
+          },
+        },
+      },
+    } as typeof scale;
+    const records: unknown[] = [];
+
+    await expect(
+      runPipeline(exploding, input, { ...ports, records: (r) => void records.push(r) }),
+    ).rejects.toThrow(NodeFailedError);
+    expect(records).toHaveLength(0);
+  });
+
+  it("a successful run never hears onRunFail", async () => {
+    const ports = writerPorts();
+    await runPipeline(buildScalePipeline(), input, ports);
+    expect(ports.observed.some((e) => e.hook === "onRunFail")).toBe(false);
   });
 
   it("pairs the node even when a MISSING PORT kills the run", async () => {
@@ -250,6 +289,7 @@ describe("a failed run", () => {
       "onRunStart",
       "onNodeStart",
       "onNodeEnd",
+      "onRunFail",
     ]);
     const end = ports.observed[2];
     expect(end?.hook === "onNodeEnd" && end.event.nodeId).toBe("classify");

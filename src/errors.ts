@@ -40,6 +40,32 @@ export class NodeFailedError extends Error {
   }
 }
 
+/** A node ran past its declared `timeoutMs`. Its `onFailure` decides the rest. */
+export class NodeTimeoutError extends Error {
+  readonly nodeId: string;
+  readonly timeoutMs: number;
+
+  constructor(nodeId: string, timeoutMs: number) {
+    super(`node "${nodeId}" exceeded its ${timeoutMs} ms deadline`);
+    this.name = "NodeTimeoutError";
+    this.nodeId = nodeId;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * A node body that deliberately did not run — a capability switched off, not
+ * a failure. Throw it from a body or port: the runtime records the node as
+ * skipped with this message, whatever its `onFailure`, and the node span
+ * closes normally, so a switched-off node never reads as an error in the trace.
+ */
+export class NodeSkipped extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "NodeSkipped";
+  }
+}
+
 /** A gate body returned a branch it never declared. */
 export class UnknownBranchError extends Error {
   constructor(nodeId: string, branch: string, branches: string[]) {

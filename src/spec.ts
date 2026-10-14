@@ -188,6 +188,7 @@ const common = {
   version: z.string().min(1),
   describe: z.string().optional(),
   onFailure: onFailureSchema.optional(),
+  timeoutMs: z.number().int().positive().optional(),
   cache: cacheSchema.optional(),
   inputs: inputsSchema.optional(),
   fallback: fallbackSpecSchema.optional(),
@@ -500,6 +501,7 @@ export const compilePipelineSpec = <I = unknown, O = unknown>(
       version,
       ...(n.describe ? { describe: n.describe } : {}),
       ...(n.onFailure ? { onFailure: n.onFailure } : {}),
+      ...(n.timeoutMs ? { timeoutMs: n.timeoutMs } : {}),
       ...(n.cache ? { cache: n.cache } : {}),
       ...(n.inputs ? { inputs: n.inputs } : {}),
     };
@@ -515,17 +517,17 @@ export const compilePipelineSpec = <I = unknown, O = unknown>(
         break;
       }
       case "decide": {
-        const { kind, version: _v, describe: _d, onFailure: _o, cache: _c, inputs: _i, fallback: _f, ...rest } = n;
+        const { kind, version: _v, describe: _d, onFailure: _o, timeoutMs: _t, cache: _c, inputs: _i, fallback: _f, ...rest } = n;
         nodes[id] = { kind, ...base, ...withFallback, ...rest };
         break;
       }
       case "generate": {
-        const { kind, version: _v, describe: _d, onFailure: _o, cache: _c, inputs: _i, fallback: _f, ...rest } = n;
+        const { kind, version: _v, describe: _d, onFailure: _o, timeoutMs: _t, cache: _c, inputs: _i, fallback: _f, ...rest } = n;
         nodes[id] = { kind, ...base, ...withFallback, ...rest };
         break;
       }
       case "store": {
-        const { kind, version: _v, describe: _d, onFailure: _o, cache: _c, inputs: _i, fallback: _f, ...rest } = n;
+        const { kind, version: _v, describe: _d, onFailure: _o, timeoutMs: _t, cache: _c, inputs: _i, fallback: _f, ...rest } = n;
         nodes[id] = { kind, ...base, ...withFallback, ...rest };
         break;
       }
