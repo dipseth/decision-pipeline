@@ -20,7 +20,7 @@ const scale: DiagramInput = {
     { id: "classify", kind: "decide", questions: "jev-scale-classify", onFailure: "fallback", version: "3", timeoutMs: 4000 },
     { id: "gate", kind: "code", role: "gate", branches: ["direct", "writer"], thresholds: { direct_line: { env: "X", default: 0.8 } }, version: "1" },
     { id: "direct", kind: "code", role: "derive", describe: "Arithmetic on the table", version: "1" },
-    { id: "writer", kind: "generate", prompt: "recipe-scale", route: "scale-writer", version: "7" },
+    { id: "writer", kind: "generate", prompt: "recipe-scale", route: "scale-writer", version: "7", tools: { static: ["lookup", "decide"] }, submit: "decide" },
     { id: "persist", kind: "store", target: "turso", scope: "tenant", version: "1" },
   ],
   edges: [
@@ -57,8 +57,10 @@ describe("explainVersion", () => {
     (bump.nodes[3] as Record<string, unknown>).version = "8";
     const noFeedback = clone();
     noFeedback.feedback = [];
+    const tools = clone();
+    (tools.nodes[3] as Record<string, unknown>).tools = { static: ["lookup"] };
     const base = explainVersion(scale);
-    for (const changed of [describe, threshold, bump, noFeedback]) {
+    for (const changed of [describe, threshold, bump, noFeedback, tools]) {
       expect(explainVersion(changed)).not.toBe(base);
     }
   });
@@ -87,6 +89,8 @@ describe("explainBrief", () => {
     expect(brief).toContain("branches: direct | writer");
     expect(brief).toContain("thresholds: direct_line=0.8");
     expect(brief).toContain("on failure: fallback");
+    expect(brief).toContain("tools it can call: lookup, decide");
+    expect(brief).toContain('answers through the "decide" tool');
     expect(brief).toContain("stores to turso at tenant scope");
     expect(brief).toContain('"scaling-notes" → gate as a score');
   });

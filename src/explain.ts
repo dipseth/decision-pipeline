@@ -98,6 +98,7 @@ const MEANING_KEYS: readonly string[] = [
   "submit",
   "tools",
   "inputs",
+  "call",
 ];
 
 const meaningOfNode = (node: Record<string, unknown>): Record<string, unknown> => {
@@ -161,6 +162,13 @@ const nodeLine = (node: DiagramNode, branchIn: string | null): string => {
   if (node.kind === "decide" && node.questions) facts.push(`asks a fast classifier the "${node.questions}" questions`);
   if (node.kind === "decide" && node.probes) facts.push(`extra questions written by ${node.probes.from}`);
   if (node.kind === "generate" && node.prompt) facts.push(`a writer model on prompt "${node.prompt}"`);
+  const tools = node.tools as { static?: string[] | "prompt-config"; selectable?: { candidates: string[]; from: string } } | undefined;
+  if (tools?.static === "prompt-config") facts.push("tools: the ones its prompt's config names");
+  else if (Array.isArray(tools?.static) && tools.static.length > 0) facts.push(`tools it can call: ${tools.static.join(", ")}`);
+  if (tools?.selectable) facts.push(`tools offered when ${tools.selectable.from} says so: ${tools.selectable.candidates.join(", ")}`);
+  if (typeof node.submit === "string") facts.push(`answers through the "${node.submit}" tool`);
+  if (typeof node.call === "string") facts.push(`calls ${node.call}`);
+  if (node.inputs && typeof node.inputs === "object") facts.push(`reads: ${Object.keys(node.inputs as object).join(", ")}`);
   if (node.role === "gate" && node.branches?.length) facts.push(`branches: ${node.branches.join(" | ")}`);
   if (node.thresholds && Object.keys(node.thresholds).length > 0) {
     const t = Object.entries(node.thresholds)
