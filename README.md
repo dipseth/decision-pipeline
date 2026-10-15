@@ -239,38 +239,33 @@ Each of the three does the job it is best at:
 | **An LLM** | Writing, reasoning over messy input, using tools | `generate` nodes, only on the branch that needs one, and the [probe writer](#probes-let-an-llm-write-jevs-questions) |
 | **Code** | Arithmetic, counting, thresholds, anything that must be exact and replayable | gates, transforms, validators, and combining Jev's answers |
 
-A decide port backed by Jev is short:
+A decide port backed by Jev is short. The package ships the wire helpers (`jevAnswersToDecideResult`, `jevHeaders`, `checkJevRequest`), so the port is just the fetch:
 
 ```ts
-import type { DecidePort } from "@rivers/decision-pipeline";
-
-type JevAnswer = { noul?: number; probabilities?: Record<string, number> };
+import {
+  JEV_ENDPOINT, JEV_MODEL, checkJevRequest, jevAnswersToDecideResult, jevHeaders,
+  type DecidePort, type JevRequestBody,
+} from "@rivers/decision-pipeline";
 
 export const jevDecide: DecidePort = async (req) => {
   const probes = Object.fromEntries(
     Object.entries(req.probes).map(([slot, { why, ...question }]) => [slot, question]), // `why` is for humans only
   );
-  const questions = { ...loadQuestions(req.questions), ...probes };  // your fixed set + this run's probes
-  const res = await fetch("https://api.typesafe.ai/v1/systemone", {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${process.env.TYPESAFE_API_KEY}` },
-    body: JSON.stringify({ model: "jev-1.13.0", state: buildState(req.input), questions }),
-  });
-  const { answers, usage } = (await res.json()) as {
-    answers: Record<string, JevAnswer>;
-    usage: { input_tokens: number };
+  const body: JevRequestBody = {
+    model: JEV_MODEL,                                      // "jev-1.14.0"
+    state: buildState(req.input),
+    questions: { ...loadQuestions(req.questions), ...probes }, // your fixed set + this run's probes
   };
-
-  const distributions: Record<string, number[]> = {};
-  const distributionOptions: Record<string, string[]> = {};
-  for (const [key, a] of Object.entries(answers)) {
-    if (typeof a.noul === "number") { distributions[key] = [a.noul]; distributionOptions[key] = ["true"]; }
-    else if (a.probabilities) {
-      distributionOptions[key] = Object.keys(a.probabilities);
-      distributions[key] = Object.values(a.probabilities);
-    }
-  }
-  return { distributions, distributionOptions, costUsd: usage.input_tokens * 0.042e-6 };
+  const problems = checkJevRequest(body);                  // e.g. a Box sent to a pre-1.14 model
+  if (problems.length > 0) throw new Error(problems.join("; "));
+  const res = await fetch(JEV_ENDPOINT, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...jevHeaders(process.env.TYPESAFE_API_KEY!, body) },
+    body: JSON.stringify(body),
+  });
+  const { answers, usage } = await res.json();
+  // noul -> [p], choice/score -> one probability per option, box -> `boxes` (see below)
+  return jevAnswersToDecideResult(answers, { usage, costUsd: (u) => (u.input_tokens ?? 0) * 0.042e-6 });
 };
 ```
 
@@ -280,7 +275,43 @@ What we learned running Jev behind gates in production:
 - **Ask atomic questions and combine them in code.** "Is this the dish they want?" is several questions at once. Ask the literal facts separately (is the excluded ingredient present? does the technique match?) and weight them in a `code` node. Those per-question probabilities also make good training features.
 - **Gate on confidence, and don't reuse thresholds across question types.** A yes/no (`noul`) probability is absolute, while a `choice` is relative to its options. The same question asked both ways gives different numbers, so tune each threshold against its own question.
 - **Math, counting and dates go in code**, not in a question. So does filtering: send Jev only the part of the state the questions are about.
-- **Pin the model version** (`jev-1.13.0`, not `jev-latest`) once thresholds are tuned. Aliases move, and a threshold tuned on one model version means something else on the next.
+- **Pin the model version** (`jev-1.14.0`, not `jev-latest` or `jev-preview`) once thresholds are tuned. Aliases move, and a threshold tuned on one model version means something else on the next. Moving a live pipeline from 1.13 to 1.14 is a challenger like any other change: shadow it, then re-tune the gates on its records.
+
+## Box: find where something is in an image
+
+Jev 1.14 adds images and a fourth question type, **Box**: "the coffee mug in \`photo\`" is answered with the four edges of a box around it, as fractions of the image (`left`/`right` of the width, `top`/`bottom` of the height, origin top-left), plus a `confidence`. TypeSafe calls images and Box *dreamer-ready*: they need `jev-1.14.0` (or `jev-preview`) and the `TypeSafe-Danger-Zone-Images: true` header (`jevHeaders` adds it when a request carries an image or a Box), and their format and accuracy may still change.
+
+A Box is still an estimate, so it fits the pipeline without a new node kind:
+
+- **The decide port returns it under `boxes`.** `jevAnswersToDecideResult` does this for you. The runtime checks each box (edges in 0..1, `left < right`, `top < bottom`; a bad one fails the node, so `onFailure` decides), records it on the node as `boxes`, and mirrors its confidence into `distributions` as `[confidence]` (option `"confidence"`). A gate thresholds a Box's confidence exactly as it does a Noul, and offline re-tuning works from records alone.
+- **The edges reach code, not the gate's branch.** `interpret` gets them as a third argument, and every later node reads `args.boxes.<decideNode>.<question>` (`$boxes` in a JSON spec). The decide node's value keeps its shape, so adding a Box to a question set never breaks an existing gate expression.
+- **There is no "not found".** A Box about something absent still returns four edges. Ask a Noul ("Is there a coffee mug in \`photo\`?") in the same request, and let the gate ignore the box when it is low.
+- **Code does the geometry.** `boxToPixels` (PIL crop order), `padBox` (the docs' answer to a low-confidence box you must not cut off), `boxIoU` (score a person's redrawn box against the pipeline's, a natural `score` feedback edge), `tileBoxes` + `boxFromTile` (find a small target: a Choice over tiles, then a Box on the tile's crop, mapped back), and `edgeCheckQuestions` + `expandBoxEdges` (one Noul per edge on the crop, the check that caught 30 of 36 cut-off crops in TypeSafe's test).
+- **The record gains flat features**: `<node>.<question>.box_area`, `.box_cx`, `.box_cy` beside the usual `.top` (the confidence).
+
+```ts
+locate: {
+  kind: "decide", questions: "jev-mug-locate", state: ["photo"], version: "1",
+  // jev-mug-locate = { mug_visible: noul "Is there a coffee mug in `photo`?", mug: box "the coffee mug in `photo`" }
+},
+gate: {
+  kind: "code", role: "gate", version: "1",
+  branches: ["crop", "pad_crop", "none"],
+  thresholds: { visible: 0.5, box: 0.6 },             // no recommended Box threshold yet: tune on your images
+  run: ({ primary, thresholds: t }) => {
+    const d = primary as Record<string, number[]>;    // the Box's confidence is d.mug[0]
+    if (d.mug_visible[0] < t.visible) return { branch: "none", reason: "no mug" };
+    return d.mug[0] >= t.box ? "crop" : "pad_crop";
+  },
+},
+pad_crop: {
+  kind: "code", role: "derive", version: "1", thresholds: { pad: 0.05 },
+  run: ({ boxes, input, thresholds }) =>
+    boxToPixels(padBox(boxes.locate.mug.box, thresholds.pad), input.width, input.height),
+},
+```
+
+Probes stay Noul, Choice and Score: a probe is evidence for a writer, and a box for an input-specific target is better asked as a fixed question so its confidence can be tuned.
 
 ## Probes: let an LLM write Jev's questions
 
@@ -631,7 +662,7 @@ The core imports no tracing vendor, but every concept was designed to bind to a 
 
 ```bash
 npm install
-npm test              # vitest: 310 tests, no network
+npm test              # vitest: 365 tests, no network
 npm run type-check
 ```
 

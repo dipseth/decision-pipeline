@@ -13,6 +13,7 @@ import { assignArm, mergePatches, type ArmAssignment, type ManifestPatch } from 
 import { buildScopeContext, type ScopeRejection } from "./scope";
 import { compositeVersion, nodeCacheKey } from "./version";
 import { distributionFeatures } from "./features";
+import { BOX_CONFIDENCE_OPTION, boxFeatures, checkBoxAnswer } from "./box";
 import {
   collectProbes,
   probeAnswers,
@@ -39,6 +40,7 @@ import type { RunRecord, RunRecordNode } from "./record";
 import {
   hasThresholds,
   isGateNode,
+  type BoxAnswer,
   type BranchTaken,
   type NodeRunArgs,
   type OverrideRow,
@@ -280,9 +282,11 @@ export const runPipeline = async <I, O>(
       const skipped: Record<string, string> = {};
       const recordNodes: RunRecordNode[] = [];
       const decideDistributions: Array<{ nodeId: string; distributions: Record<string, number[]> }> = [];
+      const decideBoxes: Array<{ nodeId: string; boxes: Record<string, BoxAnswer> }> = [];
       const perRunCache = new Map<string, unknown>();
       /** Decide node id -> its answered probes. Never handed to a gate. */
       const probesByNode: Record<string, readonly ProbeAnswer[]> = {};
+      const boxesByNode: Record<string, Record<string, BoxAnswer>> = {};
       const probeFeatureValues: Record<string, number> = {};
       let costUsd = 0;
       let lastGateConfidence: number | null = null;
@@ -405,6 +409,7 @@ export const runPipeline = async <I, O>(
           node: { id, version: n.version },
           branches: verdicts,
           probes: isGateNode(n) ? NO_PROBES : probesByNode,
+          boxes: boxesByNode,
           signal,
         };
 
@@ -523,31 +528,66 @@ export const runPipeline = async <I, O>(
                     batched: n.batched === true,
                     signal,
                   }));
+                  // Boxes are estimates like any distribution: checked here
+                  // (a bad one fails the node, so onFailure decides), recorded,
+                  // and their confidence mirrored into `distributions` so a gate
+                  // thresholds a Box exactly as it does a Noul.
+                  const boxes: Record<string, BoxAnswer> = {};
+                  let distributions = result.distributions;
+                  let distributionOptions = result.distributionOptions;
+                  if (result.boxes && Object.keys(result.boxes).length > 0) {
+                    const bad = Object.entries(result.boxes)
+                      .map(([key, a]) => [key, checkBoxAnswer(a)] as const)
+                      .filter(([, why]) => why !== null);
+                    if (bad.length > 0) {
+                      throw new Error(`bad box answer: ${bad.map(([key, why]) => `${key} (${why})`).join("; ")}`);
+                    }
+                    distributions = { ...distributions };
+                    const options = { ...(distributionOptions ?? {}) };
+                    for (const [key, a] of Object.entries(result.boxes)) {
+                      boxes[key] = { box: { ...a.box }, confidence: a.confidence };
+                      if (!(key in distributions)) {
+                        distributions[key] = [a.confidence];
+                        options[key] = [BOX_CONFIDENCE_OPTION];
+                      }
+                    }
+                    distributionOptions = options;
+                    entry.boxes = boxes;
+                  }
                   // The record keeps EVERY distribution (replay needs the
                   // probes too); gates, `interpret` and the per-question
                   // features see only the static questions.
-                  entry.distributions = result.distributions;
-                  if (result.distributionOptions) {
-                    entry.distribution_options = result.distributionOptions;
+                  entry.distributions = distributions;
+                  if (distributionOptions) {
+                    entry.distribution_options = distributionOptions;
                   }
                   if (result.batchTraceId) entry.batch_trace_id = result.batchTraceId;
                   entry.cost_reported = result.costUsd !== undefined;
                   entry.cost_usd = result.costUsd ?? 0;
                   costUsd += entry.cost_usd;
-                  const { fixed } = splitProbeDistributions(result.distributions);
+                  const { fixed } = splitProbeDistributions(distributions);
                   decideDistributions.push({ nodeId: id, distributions: fixed });
+                  const fixedBoxes = Object.fromEntries(Object.entries(boxes).filter(([key]) => key in fixed));
+                  const hasBoxes = Object.keys(fixedBoxes).length > 0;
+                  if (hasBoxes) {
+                    decideBoxes.push({ nodeId: id, boxes: fixedBoxes });
+                    boxesByNode[id] = fixedBoxes;
+                  }
                   if (probeRecord) {
                     const { answers, unanswered } = probeAnswers(
                       probeRecord.asked,
-                      result.distributions,
-                      result.distributionOptions,
+                      distributions,
+                      distributionOptions,
                     );
                     probeRecord.unanswered = unanswered;
                     probesByNode[id] = answers;
                     Object.assign(probeFeatureValues, probeFeatures(id, probeRecord, answers));
                   }
+                  // The value keeps its shape whether or not a Box was asked (its
+                  // confidence is in `fixed`); the edges reach later nodes on
+                  // `args.boxes`, and `interpret` here.
                   const value = n.interpret
-                    ? n.interpret(fixed, args)
+                    ? n.interpret(fixed, args, fixedBoxes)
                     : (result.value ?? fixed);
                   finish(value, span);
                   return;
@@ -772,6 +812,7 @@ export const runPipeline = async <I, O>(
         nodes: recordNodes,
         features: {
           ...distributionFeatures(decideDistributions),
+          ...boxFeatures(decideBoxes),
           ...probeFeatureValues,
           ...(pipeline.features?.({ input, outputs, branches, ctx }) ?? {}),
           nodes_ran: ran.size,

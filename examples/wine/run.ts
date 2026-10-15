@@ -26,12 +26,14 @@ import {
   INTENSITY_LEVELS, defineRegistry, designMatrix, discoverFeatures, discoverForSpec, fitRidge, learnedImportance,
   learnedQuestionSet, pipelineFromSpec, predictLinear, questionId, rmse, runPipeline, scoreLearned, spearman,
   type DiscoverAction, type DiscoveredQuestion, type DiscoverResult, type DiscoverRow, type PipelineSpecJSON, type ProbeQuestion,
+  JEV_MODEL as DEFAULT_JEV_MODEL,
 } from "../../src/index";
 import { jsonataEngine } from "../../src/jsonata";
 import { testPorts } from "../../src/testing";
 
 const DATA = join(dirname(fileURLToPath(import.meta.url)), "data");
-const JEV_MODEL = process.env.JEV_MODEL ?? "jev-1.13.0";
+// The table in README.md was measured on jev-1.13.0; set JEV_MODEL=jev-1.13.0 to reproduce it.
+const JEV_MODEL = process.env.JEV_MODEL ?? DEFAULT_JEV_MODEL;
 const AUTHOR_MODEL = process.env.AUTHOR_MODEL ?? "claude-sonnet-5";
 const USD_PER_JEV_TOKEN = 0.042e-6;
 const N_DEV = 1200, N_TEST = 800, EXAMPLES = 60, PROPOSALS = 18, WORKERS = 16;

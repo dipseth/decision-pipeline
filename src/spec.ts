@@ -25,7 +25,8 @@
  * ./jsonata) so this file stays zod-only. An expression sees the node's
  * resolved `inputs` as its root (or `from`, by node id, when it declares
  * none) and `$input`, `$t` (thresholds), `$primary`, `$branches`, `$probes`
- * (never for a gate) and the registry's functions as bindings.
+ * (never for a gate), `$boxes` (decide node -> its Box answers) and the
+ * registry's functions as bindings.
  *
  * A compiled node's version is the declared one plus a hash of its body
  * (`1~3fa9…`): editing an expression IS a new node version — the cache key
@@ -126,7 +127,7 @@ export interface SpecRegistry {
 export const primitiveRef = (p: Pick<Primitive, "id" | "version">): string => `${p.id}@${p.version}`;
 
 /** Names an expression already has — a registry function may not shadow them. */
-const RESERVED_BINDINGS = ["input", "t", "primary", "branches", "probes"];
+const RESERVED_BINDINGS = ["input", "t", "primary", "branches", "probes", "boxes"];
 
 export const definePrimitive = <A, R>(p: Primitive<A, R>): Primitive<A, R> => p;
 
@@ -430,6 +431,7 @@ export const compilePipelineSpec = <I = unknown, O = unknown>(
     primary: args.primary,
     branches: args.branches,
     probes: gate ? {} : args.probes,
+    boxes: args.boxes,
   });
   const rootFor = (args: NodeRunArgs, declaresInputs: boolean): unknown => (declaresInputs ? args.in : args.from);
   const ctxFor = (args: NodeRunArgs): PrimitiveContext => ({
