@@ -139,6 +139,25 @@ export interface ProbeSpec {
   maxChars?: number;
 }
 
+// ---------------------------------------------------------------------------
+// Box — where something is in an image (Jev 1.14; see ./box)
+// ---------------------------------------------------------------------------
+
+/** Four edges as fractions of the image, origin top-left; each 0..1, `left < right`, `top < bottom`. */
+export interface Box {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+/** One Box question's answer. There is no "not found": pair it with a Noul. */
+export interface BoxAnswer {
+  box: Box;
+  /** 0..1. Higher means the model is more sure. No recommended threshold yet: tune it. */
+  confidence: number;
+}
+
 /** A probe beside its answer — what downstream non-gate nodes see. */
 export interface ProbeAnswer {
   /** Slot key, `probe_<n>`. Means nothing across runs. */
@@ -188,6 +207,12 @@ export interface NodeRunArgs<I = unknown> {
    * questions that exist on every run, so a gate never sees a probe.
    */
   probes: Readonly<Record<string, readonly ProbeAnswer[]>>;
+  /**
+   * Decide node id -> its checked Box answers (Jev 1.14), for decide nodes
+   * that already ran and asked one. Unlike probes, a gate sees these: a Box
+   * is a fixed question, asked on every run, so its confidence is tunable.
+   */
+  boxes: Readonly<Record<string, Readonly<Record<string, BoxAnswer>>>>;
   /** Abort signal for the run, when the host supplied one. */
   signal?: AbortSignal;
 }
@@ -255,10 +280,13 @@ export interface DecideNode<I = unknown> extends NodeCommon<I> {
   /**
    * Turns the port's raw distributions into the value downstream nodes consume.
    * `distributions` are recorded whatever this returns — replay depends on them.
+   * `boxes` holds the node's checked Box answers (Jev 1.14); empty when it
+   * asked none. A Box's confidence is also in `distributions`.
    */
   interpret?: (
     distributions: Record<string, number[]>,
     args: NodeRunArgs<I>,
+    boxes: Readonly<Record<string, BoxAnswer>>,
   ) => unknown;
   /** Batched calls (cuisine sends <=12 recipes) get their own trace; the run stays per-recipe. */
   batched?: boolean;

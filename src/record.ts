@@ -9,7 +9,7 @@
  */
 
 import type { ProbeRecord } from "./probes";
-import type { NodeKind, Rank, Scope, Trigger } from "./types";
+import type { BoxAnswer, NodeKind, Rank, Scope, Trigger } from "./types";
 
 export interface RunRecordNode {
   id: string;
@@ -68,6 +68,11 @@ export interface RunRecordNode {
    * replayable, since no prompt version recovers a probe's wording.
    */
   probes?: ProbeRecord;
+  /**
+   * decide nodes that asked Box questions: the raw box answers. Their
+   * confidences also sit in `distributions`; the edges live only here.
+   */
+  boxes?: Record<string, BoxAnswer>;
   /** gate nodes: the values actually used, after env / prompt-config override. */
   thresholds?: Record<string, number>;
   /** generate nodes. */

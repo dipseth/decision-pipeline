@@ -20,6 +20,8 @@ export * from "./feedback";
 export * from "./eval";
 export * from "./features";
 export * from "./probes";
+export * from "./box";
+export * from "./jev";
 export * from "./bindings";
 export * from "./version";
 export * from "./experiments";
