@@ -22,6 +22,8 @@ A full run takes about 5 minutes and costs under $1 of Jev, plus 5 Sonnet calls.
 
 ## What we got (Jev 1.13, Claude Sonnet 5)
 
+The run now defaults to `jev-1.14.0`. These numbers were measured on 1.13, and the answer cache is keyed by model, so `JEV_MODEL=jev-1.13.0` reproduces them from `data/cache.jsonl`; a 1.14 run asks fresh.
+
 | Held-out RMSE, critic points | Cookbook (CatBoost) | Here (ridge) |
 |---|---|---|
 | Predict the average | 3.09 | 3.09 |

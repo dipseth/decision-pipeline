@@ -5,6 +5,7 @@
  * makes the whole thing testable with fakes (see ./testing).
  */
 
+import type { BoxAnswer } from "./types";
 import type { ManifestPatch } from "./experiments";
 import type { RunObserver } from "./observers";
 import type { ResolvedTools, ToolRegistry } from "./tools";
@@ -109,6 +110,14 @@ export interface DecideResult {
   distributions: Record<string, number[]>;
   /** Option keys per distribution, in the same order as its numbers. */
   distributionOptions?: Record<string, string[]>;
+  /**
+   * Box answers (Jev 1.14 `type: "box"`), keyed by question. The runtime
+   * checks each one (edges in 0..1, `left < right`, `top < bottom`, a 0..1
+   * confidence; a bad box fails the node), records it, and mirrors its
+   * confidence into `distributions` as `[confidence]` when the port did not,
+   * so a gate thresholds a box exactly as it does a Noul.
+   */
+  boxes?: Record<string, BoxAnswer>;
   /** What downstream nodes consume, when the node has no `interpret`. */
   value?: unknown;
   costUsd?: number;
