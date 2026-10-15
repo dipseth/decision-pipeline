@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   JEV_IMAGES_HEADER,
+  JEV_LONG_CONTEXT_HEADER,
   JEV_MODEL,
   checkJevRequest,
   jevAnswersToDecideResult,
   jevHeaders,
   jevNeedsImages,
-  jevSupportsImages,
+  jevSupportsBox,
 } from "./jev";
 
 const mugRequest = {
@@ -20,12 +21,13 @@ const mugRequest = {
 };
 
 describe("jev", () => {
-  it("knows which models read images", () => {
+  it("knows which models answer a box", () => {
     expect(JEV_MODEL).toBe("jev-1.14.0");
-    expect(jevSupportsImages("jev-1.14.0")).toBe(true);
-    expect(jevSupportsImages("jev-1.15.2")).toBe(true);
-    expect(jevSupportsImages("jev-preview")).toBe(true);
-    expect(jevSupportsImages("jev-1.13.0")).toBe(false);
+    expect(jevSupportsBox("jev-1.14.0")).toBe(true);
+    expect(jevSupportsBox("jev-1.15.2")).toBe(true);
+    expect(jevSupportsBox("jev-preview")).toBe(true);
+    expect(jevSupportsBox("jev-latest")).toBe(true);
+    expect(jevSupportsBox("jev-1.13.0")).toBe(false);
   });
 
   it("sends the images header only when an image or a box is in the request", () => {
@@ -33,10 +35,14 @@ describe("jev", () => {
     expect(jevHeaders("k", mugRequest)).toEqual({ authorization: "Bearer k", [JEV_IMAGES_HEADER]: "true" });
     const textOnly = { questions: { q: { type: "noul" as const, instructions: "Is `note` dry?" } } };
     expect(jevHeaders("k", textOnly)).toEqual({ authorization: "Bearer k" });
+    expect(jevHeaders("k", textOnly, { longContext: true })).toEqual({ authorization: "Bearer k", [JEV_LONG_CONTEXT_HEADER]: "true" });
   });
 
-  it("refuses a box on a model that cannot answer one, and a box with criteria", () => {
+  it("lets images through on 1.13 but refuses a box there, and a box with criteria", () => {
     expect(checkJevRequest(mugRequest)).toEqual([]);
+    const imagesOn113 = { ...mugRequest, model: "jev-1.13.0", questions: { mug_visible: mugRequest.questions.mug_visible } };
+    expect(checkJevRequest(imagesOn113)).toEqual([]);
+    expect(jevNeedsImages(imagesOn113)).toBe(true);
     const problems = checkJevRequest({
       ...mugRequest,
       model: "jev-1.13.0",

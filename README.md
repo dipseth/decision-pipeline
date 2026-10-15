@@ -256,7 +256,7 @@ export const jevDecide: DecidePort = async (req) => {
     state: buildState(req.input),
     questions: { ...loadQuestions(req.questions), ...probes }, // your fixed set + this run's probes
   };
-  const problems = checkJevRequest(body);                  // e.g. a Box sent to a pre-1.14 model
+  const problems = checkJevRequest(body);                  // e.g. a Box sent to jev-1.13.0
   if (problems.length > 0) throw new Error(problems.join("; "));
   const res = await fetch(JEV_ENDPOINT, {
     method: "POST",
@@ -275,11 +275,13 @@ What we learned running Jev behind gates in production:
 - **Ask atomic questions and combine them in code.** "Is this the dish they want?" is several questions at once. Ask the literal facts separately (is the excluded ingredient present? does the technique match?) and weight them in a `code` node. Those per-question probabilities also make good training features.
 - **Gate on confidence, and don't reuse thresholds across question types.** A yes/no (`noul`) probability is absolute, while a `choice` is relative to its options. The same question asked both ways gives different numbers, so tune each threshold against its own question.
 - **Math, counting and dates go in code**, not in a question. So does filtering: send Jev only the part of the state the questions are about.
-- **Pin the model version** (`jev-1.14.0`, not `jev-latest` or `jev-preview`) once thresholds are tuned. Aliases move, and a threshold tuned on one model version means something else on the next. Moving a live pipeline from 1.13 to 1.14 is a challenger like any other change: shadow it, then re-tune the gates on its records.
+- **Pin the model version** (`jev-1.14.0`, not `jev-latest` or `jev-preview`) once thresholds are tuned. Aliases move, and a threshold tuned on one model version means something else on the next. `jev-latest` moves from 1.13.0 to 1.14.0 about a week after the 1.14 release (TypeSafe promises 60 days' notice before 1.13.0 is deprecated), so a pipeline on the alias changes model underneath its thresholds. Moving a live pipeline from 1.13 to 1.14 is a challenger like any other change: shadow it, then re-tune the gates on its records.
 
 ## Box: find where something is in an image
 
-Jev 1.14 adds images and a fourth question type, **Box**: "the coffee mug in \`photo\`" is answered with the four edges of a box around it, as fractions of the image (`left`/`right` of the width, `top`/`bottom` of the height, origin top-left), plus a `confidence`. TypeSafe calls images and Box *dreamer-ready*: they need `jev-1.14.0` (or `jev-preview`) and the `TypeSafe-Danger-Zone-Images: true` header (`jevHeaders` adds it when a request carries an image or a Box), and their format and accuracy may still change.
+TypeSafe's October 2026 release puts three "danger zone" features behind per-request headers: **images**, which work on every Jev including `jev-1.13.0` (`TypeSafe-Danger-Zone-Images: true`; an image is an asset whose id can go anywhere in the JSON: state, instructions or criteria), **longer context** (`TypeSafe-Danger-Zone-Long-Context: true`), and a fourth question type, **Box**, on `jev-1.14.0` only. TypeSafe calls them dreamer-ready, not production-ready: format and accuracy may still change, and every model is weaker on images than on text, so decompose image questions as finely as you can. `jevHeaders` adds the images header when a request carries an image or a Box, and the long-context one only when you pass `{ longContext: true }` (keep state small anyway: send Jev only what the questions are about).
+
+A Box ("the coffee mug in \`photo\`") is answered with the four edges of a box around the target, as fractions of the image (`left`/`right` of the width, `top`/`bottom` of the height, origin top-left), plus a `confidence`.
 
 A Box is still an estimate, so it fits the pipeline without a new node kind:
 

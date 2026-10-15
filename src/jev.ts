@@ -2,11 +2,19 @@
  * Jev wire helpers — pure, no fetch. The decide port stays the host's; these
  * are the parts every Jev-backed port was writing by hand.
  *
- * Jev 1.14 adds images and the `box` question type. Both are "dreamer-ready"
- * on TypeSafe's side: they need `jev-1.14.0` (or `jev-preview`) and the
- * `TypeSafe-Danger-Zone-Images: true` header on every request that carries an
- * image or a Box, and their format and accuracy may change between releases.
- * Pin the exact version once a Box threshold is tuned.
+ * TypeSafe's "danger zone" features (Oct 2026) are opt-in per request through
+ * headers, and are dreamer-ready rather than production-ready: format and
+ * accuracy may change between releases.
+ *  - Images work on every Jev, `jev-1.13.0` included, behind
+ *    `TypeSafe-Danger-Zone-Images: true`. An image is an asset whose id can
+ *    appear anywhere the JSON does: state, instructions, even criteria.
+ *  - The `box` question type needs `jev-1.14.0` (or `jev-preview`), and the
+ *    same images header.
+ *  - Longer context than production allows, behind
+ *    `TypeSafe-Danger-Zone-Long-Context: true`. TypeSafe still recommends
+ *    keeping state short; so does this package (send only what is asked about).
+ * `jev-latest` moves to 1.14.0 a week after release: pin the exact version
+ * once a threshold is tuned.
  */
 
 import { BOX_CONFIDENCE_OPTION, type BoxQuestion } from "./box";
@@ -20,6 +28,8 @@ export const JEV_PREVIEW_MODEL = "jev-preview";
 export const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 /** Required on any request with an image asset or a Box question. */
 export const JEV_IMAGES_HEADER = "TypeSafe-Danger-Zone-Images";
+/** Opt-in to context beyond the production limit. Less reliable; prefer a smaller state. */
+export const JEV_LONG_CONTEXT_HEADER = "TypeSafe-Danger-Zone-Long-Context";
 
 /** Every question shape a decide node can send: the probe shapes plus Box. */
 export type JevQuestion = Omit<ProbeQuestion, "why"> | BoxQuestion;
@@ -56,11 +66,11 @@ export interface JevUsage {
 const VERSION = /^jev-(\d+)\.(\d+)\.(\d+)$/;
 
 /**
- * Whether `model` answers Box questions and reads images. `jev-preview` does;
- * a pinned version does from 1.14.0; an alias this package cannot read
- * (`jev-latest`) is given the benefit of the doubt.
+ * Whether `model` answers Box questions: `jev-preview`, or a pinned version
+ * from 1.14.0. An alias this package cannot read (`jev-latest`) is given the
+ * benefit of the doubt. Images alone need no particular version.
  */
-export const jevSupportsImages = (model: string): boolean => {
+export const jevSupportsBox = (model: string): boolean => {
   if (model === JEV_PREVIEW_MODEL) return true;
   const m = VERSION.exec(model);
   if (!m) return true;
@@ -84,18 +94,24 @@ export const checkJevRequest = (body: JevRequestBody): string[] => {
     if ("criteria" in q) problems.push(`question "${key}": a box takes no criteria`);
     if (!q.instructions.trim()) problems.push(`question "${key}": a box needs instructions naming the target and the image`);
   }
-  if (jevNeedsImages(body) && !jevSupportsImages(body.model)) {
-    problems.push(
-      `model "${body.model}" does not answer box questions or read images; send "${JEV_MODEL}" or "${JEV_PREVIEW_MODEL}"`,
-    );
+  if (boxes.length > 0 && !jevSupportsBox(body.model)) {
+    problems.push(`model "${body.model}" does not answer box questions; send "${JEV_MODEL}" or "${JEV_PREVIEW_MODEL}"`);
   }
   return problems;
 };
 
-/** Auth, plus the images header when the request needs it. Content type is the caller's (JSON or multipart). */
-export const jevHeaders = (apiKey: string, body: Pick<JevRequestBody, "questions" | "assets">): Record<string, string> => ({
+/**
+ * Auth, the images header when the request needs it, and the long-context
+ * header only when asked for. Content type is the caller's (JSON or multipart).
+ */
+export const jevHeaders = (
+  apiKey: string,
+  body: Pick<JevRequestBody, "questions" | "assets">,
+  opts: { longContext?: boolean } = {},
+): Record<string, string> => ({
   authorization: `Bearer ${apiKey}`,
   ...(jevNeedsImages(body) ? { [JEV_IMAGES_HEADER]: "true" } : {}),
+  ...(opts.longContext ? { [JEV_LONG_CONTEXT_HEADER]: "true" } : {}),
 });
 
 /**
