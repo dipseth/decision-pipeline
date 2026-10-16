@@ -18,6 +18,10 @@ python3 examples/wine/sample.py        # the cookbook's exact 2,000-review sampl
 TYPESAFE_API_KEY=… ANTHROPIC_API_KEY=… npx tsx examples/wine/run.ts --run r1 [--rounds 5]
 ```
 
+### Run it in Python
+
+The same script, ported, lives in the Python repo at [`examples/wine/run.py`](https://github.com/dipseth/decision-pipeline-python/tree/main/examples/wine) with the same flags, environment variables and output files. The two share the Jev cache format (`data/cache.jsonl`, same keys), so answers fetched by one replay for free in the other.
+
 A full run takes about 5 minutes and costs under $1 of Jev, plus 5 Sonnet calls. Every Jev answer is cached in `data/cache.jsonl`, and each run's loop is saved in `data/runs/<run>/discovery.json`, so a re-run replays for free. `data/runs/<run>/` also gets `spec.json`, `question-set.json` and `report.json`.
 
 ## What we got (Jev 1.13, Claude Sonnet 5)

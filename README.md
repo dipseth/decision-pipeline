@@ -9,6 +9,7 @@
   <a href="https://github.com/dipseth/decision-pipeline/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/dipseth/decision-pipeline/ci.yml?branch=main&style=flat-square&label=tests" alt="tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-5F9D8A?style=flat-square" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript strict">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/runtime%20deps-zod%20only-9C8A45?style=flat-square" alt="Runtime dependencies: zod only">
 </p>
 
@@ -198,6 +199,16 @@ record.nodes;   // classify (with its distributions), gate (branch + thresholds)
 ```
 
 Script the model to say 41% instead, and the same pipeline takes the `writer` branch. The record then says why: `branch_reason: "not sure it's a refund"`. In production you pass real ports instead of `testPorts()`: see [Ports](#ports-bring-your-own-everything).
+
+## Python
+
+The same core is available as a Python package, [`decision-pipeline-python`](https://github.com/dipseth/decision-pipeline-python), with the same manifest contract, run record and JSON wire formats, so a spec written for one runs on the other, and the same hashes, versions and fingerprints. Not on PyPI yet:
+
+```bash
+pip install "decision-pipeline[jsonata] @ git+https://github.com/dipseth/decision-pipeline-python"
+```
+
+Its README has the quick start and the TypeScript → Python name map. The [`decision-pipeline` skill](.claude/skills/decision-pipeline/SKILL.md) in this repo covers both languages.
 
 ## The rules
 
@@ -653,12 +664,12 @@ The core imports no tracing vendor, but every concept was designed to bind to a 
 
 ## Status
 
-`0.x`. The core runs several production pipelines, but the API can still change between minor versions. Not built yet:
+`0.x`. The core runs several production pipelines, and there is a [Python port](https://github.com/dipseth/decision-pipeline-python), but the API can still change between minor versions. Not built yet:
 
 - Sequential (always-valid) testing, and false-discovery control across the many challengers a proposer can produce
 - Prediction-powered inference, which corrects LLM-judge labels with a few human reads
 - A replay harness (`mode: "replay"`). Everything it needs is already on the record
-- Published npm builds
+- Published npm and PyPI builds
 
 ## Develop
 
@@ -667,6 +678,8 @@ npm install
 npm test              # vitest: 365 tests, no network
 npm run type-check
 ```
+
+The Python package lives in its own repo, [decision-pipeline-python](https://github.com/dipseth/decision-pipeline-python); port changes to `src/` there too.
 
 `src/test-fixtures.ts` holds a complete example manifest, and `src/testing.ts` has the in-memory ports so your own app's tests can use the same fakes. Issues and PRs are welcome.
 
