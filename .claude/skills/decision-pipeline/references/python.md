@@ -106,7 +106,7 @@ Nodes, edges and feedback edges may also be dict literals with camelCase or snak
 | `evals` | `await record_pipeline_eval_run(pipeline, PipelineEvalRun(rows=[EvalRow(...)]), ports)`, `eval_run_name` |
 | `probes` | `collect_probes`, `probe_answers`, `probe_features`, `MAX_PROBES`, `probe_question_schema` |
 | `box` | `check_box_answer`, `box_width`, `box_height`, `box_area`, `box_center`, `pad_box`, `box_to_pixels`, `box_iou`, `tile_boxes`, `box_from_tile`, `edge_check_questions`, `expand_box_edges`, `box_features`, `BOX_CONFIDENCE_OPTION`; `Box`, `BoxAnswer` |
-| `jev` | `JEV_MODEL` (`jev-1.14.0`), `JEV_PREVIEW_MODEL`, `JEV_ENDPOINT`, `JEV_IMAGES_HEADER`, `JEV_LONG_CONTEXT_HEADER`, `jev_supports_box`, `jev_needs_images`, `check_jev_request(body) -> list[str]`, `jev_headers(api_key, body, *, long_context=False)`, `jev_answers_to_decide_result(answers, usage=, cost_usd=)` |
+| `jev` | `JEV_MODEL` (`jev-1.14.0`), `JEV_PREVIEW_MODEL`, `JEV_ENDPOINT`, `JEV_IMAGES_HEADER`, `JEV_LONG_CONTEXT_HEADER`, `jev_supports_box`, `jev_needs_images`, `check_jev_request(body) -> list[str]`, `jev_headers(api_key, body, *, long_context=False)`, `jev_extra_headers(questions, state=None, *, assets=None, images=False, long_context=False)`, `jev_answers_to_decide_result(answers, usage=, cost_usd=)`, `jev_response_to_decide_result(response, cost_usd=)` |
 | `bindings` | `parse_input_ref`, `resolve_inputs`, `binding_problems` |
 | `experiments` / `patch` | `ManifestPatch`, `GuardPatch`, `ExperimentSpec`, `assign_arm`, `merge_patches`, `apply_manifest_patch`, `manifest_patch_from_dict` |
 | `spec` | `compile_pipeline_spec(spec_dict, registry, engine)` → `CompileResult(pipeline, problems)`, `pipeline_from_spec`, `define_registry(primitives=, functions=, schemas=, features=)`, `define_primitive(id=, version=, describe=, args=, run=)`, `describe_registry`, `pipeline_spec_json_schema()`, `merge_registries` |
@@ -149,6 +149,11 @@ async def jev_decide(req: DecideRequest) -> DecideResult:
 
 `jev_headers` adds the images header when the request carries an image asset or a Box, and the long-context
 header only with `long_context=True`; `check_jev_request` refuses a Box on a pre-1.14 model.
+
+With the official `typesafe-sdk` (extra `typesafe`): `res = await client.system_one(state=, questions=, model=JEV_MODEL,
+extra_headers=jev_extra_headers(questions, state))` then `jev_response_to_decide_result(res, cost_usd=)`. The SDK
+sends auth but never the danger-zone headers, and defaults to `jev-latest`, so pin `JEV_MODEL`. Every Jev helper
+reads SDK objects (`Noul`/`Box`/`Image`/`SystemOneResponse`) and plain dicts alike; the package never imports the SDK. A Box answer with `confidence: None` (allowed by the SDK) fails the decide node on purpose: a gate needs a number, so `on_failure` decides.
 
 ## Box (Jev 1.14)
 

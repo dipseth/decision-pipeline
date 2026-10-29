@@ -62,7 +62,7 @@ const { output, route, record } = await runPipeline(triage, { id: "t-42", text: 
 | `eval` | `recordPipelineEvalRun(pipeline, { rows, traceId, experiment?, arm?, extraScores? }, ports)`; `evalRunName` |
 | `probes` | `collectProbes`, `probeAnswers`, `probeFeatures`, `MAX_PROBES` (8), `probeQuestionSchema` |
 | `box` | `checkBoxAnswer`, `boxWidth`, `boxHeight`, `boxArea`, `boxCenter`, `padBox`, `boxToPixels`, `boxIoU`, `tileBoxes`, `boxFromTile`, `edgeCheckQuestions`, `expandBoxEdges`, `boxFeatures`, `BOX_CONFIDENCE_OPTION`, `BOX_EDGES`; types `Box`, `BoxAnswer`, `BoxQuestion`, `BoxEdge` |
-| `jev` | `JEV_MODEL` (`jev-1.14.0`), `JEV_PREVIEW_MODEL`, `JEV_ENDPOINT`, `JEV_IMAGES_HEADER`, `JEV_LONG_CONTEXT_HEADER`, `jevSupportsBox`, `jevNeedsImages`, `checkJevRequest(body): string[]`, `jevHeaders(apiKey, body, { longContext? })`, `jevAnswersToDecideResult(answers, { usage?, costUsd? })`; types `JevRequestBody`, `JevQuestion`, `JevAsset`, `JevAnswer`, `JevUsage` |
+| `jev` | `JEV_MODEL` (`jev-1.14.0`), `JEV_PREVIEW_MODEL`, `JEV_ENDPOINT`, `JEV_IMAGES_HEADER`, `JEV_LONG_CONTEXT_HEADER`, `jevSupportsBox`, `jevNeedsImages`, `checkJevRequest(body): string[]`, `jevHeaders(apiKey, body, { longContext? })`, `jevExtraHeaders(body, { images?, longContext? })`, `jevAnswersToDecideResult(answers, { usage?, costUsd? })`, `jevResponseToDecideResult(response, { costUsd? })`; types `JevRequestBody`, `JevQuestion`, `JevAnyQuestion`, `JevAsset`, `JevAnswer`, `JevUsage` |
 | `bindings` | `parseInputRef`, `resolveInputs`, `bindingProblems` |
 | `experiments` / `patch` | `ManifestPatch { thresholds, prompts, questions, routes, tools, guards }`, `assignArm`, `mergePatches`, `applyManifestPatch` |
 | `spec` | `compilePipelineSpec(json, registry, engine)` → `{ pipeline, problems }`, `pipelineFromSpec` (throws), `defineRegistry({ primitives, functions, schemas, features })`, `definePrimitive({ id, version, describe, args, run })`, `describeRegistry`, `pipelineSpecJsonSchema()` |
@@ -120,6 +120,11 @@ export const jevDecide: DecidePort = async (req) => {
 ```
 
 `checkJevRequest` refuses a Box on a pre-1.14 model (`jevSupportsBox`) or a Box with `criteria`.
+
+With the official `@typesafe-ai/sdk`: `const res = await client.systemOne({ state, questions, model: JEV_MODEL },
+{ headers: jevExtraHeaders({ state, questions }) })` then `jevResponseToDecideResult(res, { costUsd })`. The SDK sends
+auth but never the danger-zone headers, and defaults to `jev-latest`, so pin `JEV_MODEL`. Every Jev helper reads SDK
+objects (`image()`, `withAssets` text, results with `null` usage counts) by shape; the package never imports the SDK. A Box answer with `confidence: null` (allowed by the SDK) fails the decide node on purpose: a gate needs a number, so `onFailure` decides.
 
 ## Box (Jev 1.14)
 

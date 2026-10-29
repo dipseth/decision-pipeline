@@ -5,8 +5,10 @@ import {
   JEV_MODEL,
   checkJevRequest,
   jevAnswersToDecideResult,
+  jevExtraHeaders,
   jevHeaders,
   jevNeedsImages,
+  jevResponseToDecideResult,
   jevSupportsBox,
 } from "./jev";
 
@@ -65,6 +67,49 @@ describe("jev", () => {
     expect(result.distributions).toEqual({ mug_visible: [0.97], room: [0.8, 0.2], mug: [0.92] });
     expect(result.distributionOptions).toEqual({ mug_visible: ["true"], room: ["kitchen", "office"], mug: ["confidence"] });
     expect(result.boxes?.mug?.box.left).toBe(0.44);
+    expect(result.costUsd).toBeCloseTo(0.00029, 10);
+  });
+
+  // @typesafe-ai/sdk objects, faked by shape: the helpers never import the SDK.
+  const sdkImage = () => ({ type: "image" as const, data: new Uint8Array([0xff, 0xd8, 0xff]), toJSON: () => "<asset:1>" });
+  const sdkText = (text: string, assets: unknown[]) => ({ text, assets, toJSON: () => text });
+
+  it("reads SDK requests: images placed in state, in questions, in withAssets text, or in assets", () => {
+    const textOnly = { q: { type: "noul", instructions: "Is `note` dry?" } };
+    expect(jevExtraHeaders({ questions: textOnly, state: { note: "wet" } })).toEqual({});
+    expect(jevExtraHeaders({ questions: textOnly }, { longContext: true })).toEqual({ [JEV_LONG_CONTEXT_HEADER]: "true" });
+    expect(jevExtraHeaders({ questions: textOnly }, { images: true })).toEqual({ [JEV_IMAGES_HEADER]: "true" });
+    const needs = { [JEV_IMAGES_HEADER]: "true" };
+    expect(jevExtraHeaders({ questions: textOnly, state: { claim: "chipped rim", photo: sdkImage() } })).toEqual(needs);
+    expect(jevExtraHeaders({ questions: { q: { type: "noul", instructions: ["Is this damaged?", sdkImage()] } } })).toEqual(needs);
+    expect(jevExtraHeaders({ questions: textOnly, state: sdkText("A seller uploaded <asset:1>.", [sdkImage()]) })).toEqual(needs);
+    expect(jevNeedsImages({ questions: textOnly, assets: { "<photo>": sdkImage() } })).toBe(true);
+    // A plain object with `data` is not an image.
+    expect(jevNeedsImages({ questions: textOnly, state: { type: "image", data: "x" } })).toBe(false);
+  });
+
+  it("checks SDK box questions: content instructions pass, a missing one is flagged, no model is no version check", () => {
+    expect(checkJevRequest({ model: JEV_MODEL, questions: { mug: { type: "box", instructions: ["the mug in", sdkImage()] } } })).toEqual([]);
+    expect(checkJevRequest({ questions: { mug: { type: "box" } } })[0]).toMatch(/needs instructions/);
+    expect(checkJevRequest({ questions: { mug: { type: "box", instructions: "the mug" } } })).toEqual([]);
+  });
+
+  it("maps an SDK systemOne result, dropping null usage counts", () => {
+    const seen: unknown[] = [];
+    const result = jevResponseToDecideResult(
+      {
+        answers: {
+          mug_visible: { type: "noul", noul: 0.97 },
+          urgency: { type: "score", score: 1.7, probabilities: { "0": 0.1, "1": 0.1, "2": 0.8 } },
+          mug: { type: "box", box: { top: 0.25, bottom: 0.82, left: 0.44, right: 0.84 }, confidence: 0.92 },
+        },
+        usage: { input_tokens: 290, output_tokens: null },
+      },
+      { costUsd: (u) => (seen.push(u), (u.input_tokens ?? 0) * 1e-6) },
+    );
+    expect(result.distributions).toEqual({ mug_visible: [0.97], urgency: [0.1, 0.1, 0.8], mug: [0.92] });
+    expect(result.distributionOptions).toEqual({ mug_visible: ["true"], urgency: ["0", "1", "2"], mug: ["confidence"] });
+    expect(seen).toEqual([{ input_tokens: 290 }]);
     expect(result.costUsd).toBeCloseTo(0.00029, 10);
   });
 });

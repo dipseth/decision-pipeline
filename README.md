@@ -280,6 +280,28 @@ export const jevDecide: DecidePort = async (req) => {
 };
 ```
 
+With the official [`@typesafe-ai/sdk`](https://docs.typesafe.ai/sdk/javascript) (Node 22+) the port is shorter: the client handles auth, retries, images as multipart and compression. Two things it does not do: send the danger-zone headers (`jevExtraHeaders` does, for the per-call `headers` option), and pin a model (its default is `jev-latest`; pass `JEV_MODEL`). The helpers read SDK objects (`image()`, `withAssets` text, `systemOne` results) by shape as well as plain JSON, and this package does not depend on the SDK.
+
+```ts
+import { TypeSafeClient } from "@typesafe-ai/sdk";
+import { JEV_MODEL, checkJevRequest, jevExtraHeaders, jevResponseToDecideResult, type DecidePort } from "@rivers/decision-pipeline";
+
+const client = new TypeSafeClient(); // reads TYPESAFE_API_KEY; reuse one client
+
+export const jevDecide: DecidePort = async (req) => {
+  const probes = Object.fromEntries(Object.entries(req.probes).map(([k, { why, ...q }]) => [k, q]));
+  const state = buildState(req.input);                     // may hold image() anywhere
+  const questions = { ...loadQuestions(req.questions), ...probes };
+  const problems = checkJevRequest({ model: JEV_MODEL, questions });
+  if (problems.length > 0) throw new Error(problems.join("; "));
+  const res = await client.systemOne(
+    { state, questions, model: JEV_MODEL },
+    { signal: req.signal, headers: jevExtraHeaders({ state, questions }) }, // images header for a Box or an image
+  );
+  return jevResponseToDecideResult(res, { costUsd: (u) => (u.input_tokens ?? 0) * 0.042e-6 });
+};
+```
+
 What we learned running Jev behind gates in production:
 
 - **One state, many questions, one request.** Questions are answered independently of each other, so extra questions are nearly free. Never fan out N calls over the same material. Put everything in one state and point each question at its part with a backticked path: ``is `ingredients[3]` a leavening agent?``
